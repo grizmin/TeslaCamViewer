@@ -496,8 +496,8 @@ class LayoutEditor {
             this.hide();
         }
 
-        // Arrow keys to nudge selected camera
-        if (this.selectedCamera && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        // Arrow keys to nudge selected camera (skip when typing in an input field)
+        if (this.selectedCamera && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
             e.preventDefault();
             const cam = this.currentConfig.cameras[this.selectedCamera];
             const crop = cam.crop || { top: 0, right: 0, bottom: 0, left: 0 };

@@ -357,7 +357,7 @@ class LayoutConfig {
                 cameras: {
                     front: {
                         enabled: true,
-                        position: { x: 24.1, y: 17, width: 51, height: 50.1 },
+                        position: { x: 15, y: 18, width: 70, height: 50 },
                         zIndex: 13,
                         aspectRatio: 'auto',
                         objectFit: 'cover',
@@ -365,15 +365,15 @@ class LayoutConfig {
                     },
                     back: {
                         enabled: true,
-                        position: { x: 34.6, y: 0, width: 29.6, height: 29 },
-                        zIndex: 13,
+                        position: { x: 35, y: 0, width: 30, height: 25 },
+                        zIndex: 15,
                         aspectRatio: 'auto',
                         objectFit: 'contain',
-                        crop: { top: 0, right: 0, bottom: 34, left: 0 }
+                        crop: { top: 0, right: 0, bottom: 15, left: 0 }
                     },
                     left_repeater: {
                         enabled: true,
-                        position: { x: 55, y: 55, width: 45, height: 45 },
+                        position: { x: 55, y: 60, width: 45, height: 40 },
                         zIndex: 10,
                         aspectRatio: 'auto',
                         objectFit: 'contain',
@@ -381,10 +381,26 @@ class LayoutConfig {
                     },
                     right_repeater: {
                         enabled: true,
-                        position: { x: 0, y: 55, width: 45, height: 45 },
+                        position: { x: 0, y: 60, width: 45, height: 40 },
                         zIndex: 10,
                         aspectRatio: 'auto',
                         objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_pillar: {
+                        enabled: true,
+                        position: { x: 0, y: 0, width: 22, height: 28 },
+                        zIndex: 12,
+                        aspectRatio: 'auto',
+                        objectFit: 'cover',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_pillar: {
+                        enabled: true,
+                        position: { x: 78, y: 0, width: 22, height: 28 },
+                        zIndex: 12,
+                        aspectRatio: 'auto',
+                        objectFit: 'cover',
                         crop: { top: 0, right: 0, bottom: 0, left: 0 }
                     }
                 }
@@ -398,7 +414,7 @@ class LayoutConfig {
                 cameras: {
                     front: {
                         enabled: true,
-                        position: { x: 23.4, y: 0.25, width: 52.9, height: 61.4 },
+                        position: { x: 25, y: 0, width: 49.57, height: 62.06 },
                         zIndex: 20,
                         aspectRatio: 'auto',
                         objectFit: 'cover',
@@ -406,15 +422,15 @@ class LayoutConfig {
                     },
                     back: {
                         enabled: true,
-                        position: { x: 31.3, y: 56.7, width: 39, height: 54.1 },
+                        position: { x: 30, y: 58, width: 40, height: 50 },
                         zIndex: 19,
                         aspectRatio: 'auto',
-                        objectFit: 'contain',
-                        crop: { top: 7, right: 0, bottom: 20, left: 0 }
+                        objectFit: 'cover',
+                        crop: { top: 0, right: 0, bottom: 16, left: 0 }
                     },
                     left_repeater: {
                         enabled: true,
-                        position: { x: 66.1, y: 59, width: 33.9, height: 41 },
+                        position: { x: 70, y: 59, width: 30, height: 41 },
                         zIndex: 10,
                         aspectRatio: 'auto',
                         objectFit: 'cover',
@@ -422,10 +438,26 @@ class LayoutConfig {
                     },
                     right_repeater: {
                         enabled: true,
-                        position: { x: 0, y: 59, width: 32, height: 41 },
+                        position: { x: 0, y: 59, width: 30, height: 41 },
                         zIndex: 10,
                         aspectRatio: 'auto',
                         objectFit: 'cover',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_pillar: {
+                        enabled: true,
+                        position: { x: 0, y: 9.76, width: 25.43, height: 34.33 },
+                        zIndex: 15,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_pillar: {
+                        enabled: true,
+                        position: { x: 74.57, y: 9.76, width: 25, height: 34.33 },
+                        zIndex: 15,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
                         crop: { top: 0, right: 0, bottom: 0, left: 0 }
                     }
                 }
@@ -553,6 +585,177 @@ class LayoutConfig {
                     }
                 }
             },
+            'layout-front-pillars': {
+                version: 1,
+                id: 'preset-layout-front-pillars',
+                name: 'Front + Pillars',
+                author: 'Built-in',
+                canvas: { aspectRatio: '12:3', backgroundColor: '#000000' },
+                cameras: {
+                    front: {
+                        enabled: true,
+                        position: { x: 32.86, y: 0, width: 33.43, height: 100 },
+                        zIndex: 2,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    back: {
+                        enabled: false,
+                        position: { x: 50, y: 0, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_repeater: {
+                        enabled: false,
+                        position: { x: 0, y: 50, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_repeater: {
+                        enabled: false,
+                        position: { x: 50, y: 50, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_pillar: {
+                        enabled: true,
+                        position: { x: 0, y: 0, width: 32.86, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_pillar: {
+                        enabled: true,
+                        position: { x: 66.29, y: 0, width: 33.71, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    }
+                }
+            },
+            'layout-front-left-pillar': {
+                version: 1,
+                id: 'preset-layout-front-left-pillar',
+                name: 'Front + Left Pillar',
+                author: 'Built-in',
+                canvas: { aspectRatio: '8:3', backgroundColor: '#000000' },
+                cameras: {
+                    front: {
+                        enabled: true,
+                        position: { x: 50, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    back: {
+                        enabled: false,
+                        position: { x: 0, y: 0, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_repeater: {
+                        enabled: false,
+                        position: { x: 0, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_repeater: {
+                        enabled: false,
+                        position: { x: 50, y: 50, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_pillar: {
+                        enabled: true,
+                        position: { x: 0, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_pillar: {
+                        enabled: false,
+                        position: { x: 0, y: 0, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    }
+                }
+            },
+            'layout-front-right-pillar': {
+                version: 1,
+                id: 'preset-layout-front-right-pillar',
+                name: 'Front + Right Pillar',
+                author: 'Built-in',
+                canvas: { aspectRatio: '8:3', backgroundColor: '#000000' },
+                cameras: {
+                    front: {
+                        enabled: true,
+                        position: { x: 0, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    back: {
+                        enabled: false,
+                        position: { x: 0, y: 0, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_repeater: {
+                        enabled: false,
+                        position: { x: 0, y: 50, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_repeater: {
+                        enabled: false,
+                        position: { x: 50, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    left_pillar: {
+                        enabled: false,
+                        position: { x: 0, y: 0, width: 50, height: 50 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    },
+                    right_pillar: {
+                        enabled: true,
+                        position: { x: 50, y: 0, width: 50, height: 100 },
+                        zIndex: 1,
+                        aspectRatio: 'auto',
+                        objectFit: 'contain',
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 }
+                    }
+                }
+            },
             'layout-focus': {
                 version: 1,
                 id: 'preset-layout-focus',
@@ -659,9 +862,12 @@ class LayoutConfig {
             return null;
         }
 
-        // Add future cameras with disabled state
+        // Add any missing cameras with disabled state so every preset has
+        // a complete camera set. Without this, containers for undefined cameras
+        // (e.g., pillars in a 4-camera preset) skip applyToDOM styling and
+        // render at default CSS size instead of being hidden.
         const fullConfig = this.clone(config);
-        for (const cam of this.FUTURE_CAMERAS) {
+        for (const cam of this.CAMERAS) {
             if (!fullConfig.cameras[cam]) {
                 fullConfig.cameras[cam] = this.getDefaultCamera(false);
             }
@@ -680,12 +886,16 @@ class LayoutConfig {
     static getPresetNames() {
         return [
             'grid-2x2',
+            'grid-3x2',
             'layout-6-3',
             'layout-4-3',
             'layout-all-16-9',
             'layout-front-left',
             'layout-front-right',
             'layout-front-repeaters',
+            'layout-front-pillars',
+            'layout-front-left-pillar',
+            'layout-front-right-pillar',
             'layout-focus'
         ];
     }

@@ -305,7 +305,39 @@ class LayoutManager {
 
         if (!container1 || !container2) return;
 
-        // Update order array
+        // Config-driven layouts (custom and most presets) use absolute positioning
+        // so swapping DOM order has no effect. Instead, swap position/zIndex/objectFit
+        // between the two cameras in the config so they visually exchange places.
+        const config = this.currentConfig || (this._isConfigDrivenPreset() ? LayoutConfig.presetToConfig(this.currentLayout) : null);
+        if (config && config.cameras[camera1] && config.cameras[camera2]) {
+            const cam1 = config.cameras[camera1];
+            const cam2 = config.cameras[camera2];
+
+            // Swap position, zIndex, objectFit (keep enabled/crop per-camera)
+            const tmpPos = { ...cam1.position };
+            const tmpZ = cam1.zIndex;
+            const tmpFit = cam1.objectFit;
+
+            cam1.position = { ...cam2.position };
+            cam1.zIndex = cam2.zIndex;
+            cam1.objectFit = cam2.objectFit;
+
+            cam2.position = tmpPos;
+            cam2.zIndex = tmpZ;
+            cam2.objectFit = tmpFit;
+
+            // Store modified config so re-apply uses it
+            this.currentConfig = config;
+            this._configModified = true;
+            this.applyLayout(this.currentLayout);
+            this.savePreferences();
+            const resetBtn = document.getElementById('resetLayoutBtn');
+            if (resetBtn) resetBtn.style.display = '';
+            console.log(`Swapped cameras (config): ${camera1} ↔ ${camera2}`);
+            return;
+        }
+
+        // CSS-grid layouts (grid-2x2): swap DOM order (grid cells follow child order)
         const index1 = this.cameraOrder.indexOf(camera1);
         const index2 = this.cameraOrder.indexOf(camera2);
 
@@ -314,10 +346,8 @@ class LayoutManager {
             this.cameraOrder[index2] = camera1;
         }
 
-        // Swap DOM positions
         const parent = this.videoGrid;
         const children = Array.from(parent.children);
-
         const pos1 = children.indexOf(container1);
         const pos2 = children.indexOf(container2);
 
@@ -329,21 +359,31 @@ class LayoutManager {
             parent.insertBefore(container2, children[pos1 + 1] || null);
         }
 
-        // Re-apply layout to ensure proper styling
         this.applyLayout(this.currentLayout);
         this.savePreferences();
-
-        console.log(`Swapped cameras: ${camera1} ↔ ${camera2}`);
+        const resetBtn = document.getElementById('resetLayoutBtn');
+        if (resetBtn) resetBtn.style.display = '';
+        console.log(`Swapped cameras (DOM): ${camera1} ↔ ${camera2}`);
     }
 
     /**
-     * Reset camera order to default
+     * Reset camera order and layout config to defaults
      */
     resetCameraOrder() {
         this.cameraOrder = ['front', 'back', 'left_repeater', 'right_repeater'];
 
-        // Reorder DOM elements
-        const defaultOrder = ['front', 'back', 'left_repeater', 'right_repeater'];
+        // If the current layout had its config modified by drag-swap, restore the original
+        if (this._configModified && this.currentLayout) {
+            const original = LayoutConfig.presetToConfig(this.currentLayout);
+            if (original) {
+                this.currentConfig = original;
+            }
+            this._configModified = false;
+        }
+
+        // Reorder DOM elements (for CSS-grid layouts)
+        const defaultOrder = ['front', 'back', 'left_repeater', 'right_repeater',
+                              'left_pillar', 'right_pillar'];
         for (const camera of defaultOrder) {
             const container = this.videoContainers[camera];
             if (container) {
@@ -372,6 +412,15 @@ class LayoutManager {
      * @param {string|Object} layoutOrConfig - Layout name or LayoutConfig object
      */
     setLayout(layoutOrConfig) {
+        // Clear _configModified when switching to a different layout — the flag
+        // tracks drag-swap modifications on the current layout only. Without this,
+        // modifying layout A then switching to B leaves the stale flag set, and
+        // the reset-button visibility logic sees layout B as "modified" wrongly.
+        const newId = typeof layoutOrConfig === 'object' ? layoutOrConfig?.id : layoutOrConfig;
+        if (newId && newId !== this.currentLayout && newId !== 'edit-layouts') {
+            this._configModified = false;
+        }
+
         // Handle "edit-layouts" special action
         if (layoutOrConfig === 'edit-layouts') {
             // Open the layout editor
@@ -426,7 +475,8 @@ class LayoutManager {
             // Use unified renderer for custom layouts
             this.renderer.applyToDOM(this.videoGrid, this.currentConfig, {
                 cameraOrder: this.cameraOrder,
-                focusCamera: null
+                focusCamera: null,
+                visibleCameras: this.visibleCameras
             });
 
             // Hide focus camera selector for custom layouts (handled in config)
@@ -450,7 +500,8 @@ class LayoutManager {
             this.focusCamera = null;
             this.renderer.applyToDOM(this.videoGrid, presetConfig, {
                 cameraOrder: this.cameraOrder,
-                focusCamera: null
+                focusCamera: null,
+                visibleCameras: this.visibleCameras
             });
 
             const focusCameraControl = document.getElementById('focusCameraControl');
@@ -500,6 +551,11 @@ class LayoutManager {
     setCameraVisibility(camera, visible) {
         this.visibleCameras[camera] = visible;
         this.updateVisibility();
+        // Re-apply the layout so config-driven renderers respect the hide toggle
+        // (applyToDOM reads visibleCameras via options). Without this, a hide
+        // only takes effect after the next manual layout switch because the
+        // inline style.display set by applyToDOM still says 'block'.
+        this.applyLayout(this.currentLayout);
         this.savePreferences();
     }
 
@@ -590,7 +646,11 @@ class LayoutManager {
             layout: this.currentLayout,
             visibleCameras: this.visibleCameras,
             focusCamera: this.focusCamera,
-            cameraOrder: this.cameraOrder
+            cameraOrder: this.cameraOrder,
+            // Persist drag-swap modifications to preset layouts so they survive reload.
+            // Only save when modified — unmodified preset layouts should re-read from
+            // LayoutConfig on load so upstream preset changes take effect.
+            modifiedConfig: this._configModified ? this.currentConfig : null
         };
         localStorage.setItem('teslacam_layout_prefs', JSON.stringify(preferences));
     }
@@ -606,6 +666,14 @@ class LayoutManager {
                 this.currentLayout = preferences.layout || 'grid-2x2';
                 this.visibleCameras = preferences.visibleCameras || this.visibleCameras;
                 this.focusCamera = preferences.focusCamera || null;
+
+                // Restore drag-swap-modified preset config if it matches current layout
+                if (preferences.modifiedConfig && preferences.modifiedConfig.id &&
+                    (preferences.modifiedConfig.id === this.currentLayout ||
+                     preferences.modifiedConfig.id === `preset-${this.currentLayout}`)) {
+                    this.currentConfig = preferences.modifiedConfig;
+                    this._configModified = true;
+                }
 
                 // Restore camera order
                 if (preferences.cameraOrder && Array.isArray(preferences.cameraOrder)) {
@@ -714,31 +782,43 @@ class LayoutManager {
         }
 
         if (!this.hasPillarCameras) {
-            // No pillar cameras - hide pillar containers
+            // No pillar cameras - hide pillar containers regardless of layout type
             if (leftPillar) leftPillar.style.display = 'none';
             if (rightPillar) rightPillar.style.display = 'none';
-            if (leftRepeater) leftRepeater.style.display = '';
-            if (rightRepeater) rightRepeater.style.display = '';
+            // For config-driven layouts the renderer already set repeater display;
+            // only force repeaters visible when we are in a CSS-class layout that
+            // doesn't know about per-camera enabled flags.
+            if (!this.currentConfig && !this._isConfigDrivenPreset()) {
+                if (leftRepeater) leftRepeater.style.display = '';
+                if (rightRepeater) rightRepeater.style.display = '';
+            }
             return;
         }
 
-        // Check if this is a 6-camera layout (preset or custom config with all 6 enabled)
-        const isPreset6Cam = this.currentLayout === 'grid-3x2' || this.currentLayout === 'layout-6-cam';
-        const is6CameraLayout = isPreset6Cam || this._is6CameraConfig();
-
-        if (is6CameraLayout) {
-            // 6-camera layout - show all (let config handle actual visibility)
-            if (leftPillar) leftPillar.style.display = '';
-            if (rightPillar) rightPillar.style.display = '';
-            if (leftRepeater) leftRepeater.style.display = '';
-            if (rightRepeater) rightRepeater.style.display = '';
-        } else {
-            // 4-camera layout - show repeaters, hide pillars
-            if (leftPillar) leftPillar.style.display = 'none';
-            if (rightPillar) rightPillar.style.display = 'none';
-            if (leftRepeater) leftRepeater.style.display = '';
-            if (rightRepeater) rightRepeater.style.display = '';
+        // Config-driven layouts (custom or preset that went through applyToDOM)
+        // already have each container's display set per the config's enabled flags.
+        // Re-asserting visibility here silently overrides the renderer and was the
+        // cause of custom layouts with pillars rendering as repeaters. Leave them be.
+        if (this.currentConfig || this._isConfigDrivenPreset()) {
+            return;
         }
+
+        // Legacy CSS-class layouts (grid-2x2 fallback): hide pillars explicitly
+        // since the stylesheet doesn't know about them.
+        if (leftPillar) leftPillar.style.display = 'none';
+        if (rightPillar) rightPillar.style.display = 'none';
+        if (leftRepeater) leftRepeater.style.display = '';
+        if (rightRepeater) rightRepeater.style.display = '';
+    }
+
+    /**
+     * True when the current preset layout is rendered via applyToDOM (config-driven)
+     * rather than via a legacy CSS class. Matches the branches in applyLayout().
+     */
+    _isConfigDrivenPreset() {
+        if (!this.currentLayout) return false;
+        if (this.currentLayout === 'grid-2x2' || this.currentLayout === 'layout-focus') return false;
+        return !!LayoutConfig.presetToConfig(this.currentLayout);
     }
 
     /**

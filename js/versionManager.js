@@ -19,12 +19,64 @@ class VersionManager {
 
         // Current version - UPDATE THIS when releasing new features
         // Format: Year.Week.DayOfWeek.Release
-        this.currentVersion = '2026.5.1.2';
+        this.currentVersion = '2026.16.5.1';
 
         // Changelog with feature identifiers for "what's new" dots
         // Each entry has: version, date, title, and features array
         // Features have: id (for tracking seen state), text, elementSelector (optional)
         this.changelog = [
+            {
+                version: '2026.16.5.1',
+                date: '2026-04-17',
+                title: 'Export & Layout Overhaul, Drive Sync Reliability, 6-Camera Support',
+                features: [
+                    {
+                        id: 'pro-branding-toggle',
+                        text: 'Pro users: toggle the bottom banner on/off in Settings → Export. When off, exports use clean pill overlays for the timestamp and Sentry indicator instead of the full bar.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'six-camera-layouts',
+                        text: 'New built-in layouts for 6-camera vehicles: Front + Pillars, Front + Left Pillar, Front + Right Pillar (auto-shown when pillar cams are detected). 4:3 Main and All 16:9 redesigned for 6 cameras.',
+                        elementSelector: '#layoutSelect'
+                    },
+                    {
+                        id: 'drag-swap-all-layouts',
+                        text: 'Camera drag-swap now works across every layout (not just 2×2 Grid). A reset button appears after any swap to restore the layout defaults.',
+                        elementSelector: '#resetLayoutBtn'
+                    },
+                    {
+                        id: 'unified-export-pipeline',
+                        text: 'Focus-mode and grid exports now share one render path — fixes black video on MP4 and stutter on WebM, and makes the bottom banner consistent across single-camera and multi-camera exports.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'mini-map-trail-fixes',
+                        text: 'Mini-map trail in exports: distance-based pruning keeps the trail long in slow traffic, outlier GPS rejection stops the random-jump glitches, and the trail pixel math is corrected near tile boundaries.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'drive-sync-reliability',
+                        text: 'Drive Sync: real drive sizes shown instead of "0 B", destination refreshes after each sync so re-comparing works, mid-file cancel, head+tail checksum for large files, and partial-copy cleanup on errors.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'ui-performance',
+                        text: 'Fixed a RAF loop multiplication bug that made UI, HUD, and mini-map sluggish after multiple event switches.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'sidebar-scrollbar-fix',
+                        text: 'Sidebar resize handle no longer fights with the event list scrollbar.',
+                        elementSelector: null
+                    },
+                    {
+                        id: 'saved-event-preview-fix',
+                        text: 'Hover preview on Saved events now loops through the full tail footage instead of the ~1 second flash.',
+                        elementSelector: null
+                    }
+                ]
+            },
             {
                 version: '2026.5.1.2',
                 date: '2026-01-26',
@@ -689,19 +741,29 @@ class VersionManager {
         if (!element || !this.isFeatureNew(featureId)) return;
         if (this.indicators.has(featureId)) return; // Already added
 
+        // Replaced/void elements can't hold arbitrary DOM children — browsers
+        // silently drop them. Fall back to the parent container so the dot
+        // actually renders. Applies to select, input, textarea, img, etc.
+        const hostingTag = element.tagName;
+        const nonContainerTags = new Set(['SELECT', 'INPUT', 'TEXTAREA', 'IMG', 'VIDEO', 'AUDIO', 'IFRAME']);
+        let anchor = element;
+        if (nonContainerTags.has(hostingTag) && element.parentElement) {
+            anchor = element.parentElement;
+        }
+
         // Create indicator dot with tooltip
         const dot = document.createElement('span');
         dot.className = 'whats-new-dot';
         dot.dataset.featureId = featureId;
         dot.dataset.tooltip = featureText;
 
-        // Position relative to the element itself (not parent)
-        if (getComputedStyle(element).position === 'static') {
-            element.style.position = 'relative';
+        // Position relative to the anchor (not parent) so the dot floats over it
+        if (getComputedStyle(anchor).position === 'static') {
+            anchor.style.position = 'relative';
         }
 
-        // Insert dot directly into the element
-        element.appendChild(dot);
+        // Insert dot directly into the anchor
+        anchor.appendChild(dot);
 
         // Adaptive tooltip positioning
         const rect = element.getBoundingClientRect();

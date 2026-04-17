@@ -869,10 +869,15 @@ class EventBrowser {
 
             return { clipIndex: targetClipIndex, offsetInClip: Math.max(0, offsetInClip) };
         } else {
-            // For saved/other events: show last 25 seconds of last clip
+            // For saved/other events: show last ~25 seconds of last clip.
+            // Signal "tail seek" instead of a hardcoded 35s offset — the actual
+            // offset is computed from real video duration once it loads, because
+            // Saved events often have a truncated final clip (only a few seconds
+            // long, ending at the save-trigger moment) so offset 35 seeks past
+            // end and results in a broken ~1s loop.
             return {
                 clipIndex: clipCount - 1,
-                offsetInClip: 35 // ~25s from end of 60s clip
+                tailSeconds: 25
             };
         }
     }
@@ -936,7 +941,7 @@ class EventBrowser {
 
             if (!videoElement) {
                 // Get preview start info based on event type
-                const { clipIndex, offsetInClip } = this.getPreviewStartInfo(event);
+                const { clipIndex, offsetInClip, tailSeconds } = this.getPreviewStartInfo(event);
                 const clipGroup = event.clipGroups[clipIndex];
 
                 if (!clipGroup) {
@@ -982,15 +987,32 @@ class EventBrowser {
                 videoElement.playsInline = true;
                 videoElement.playbackRate = 4; // Play at 4x speed
 
-                // Store the offset for seeking after load
-                videoElement.dataset.seekOffset = offsetInClip;
+                // Store either fixed offset or tail-seconds; resolved once metadata loads.
+                if (tailSeconds != null) {
+                    videoElement.dataset.tailSeconds = tailSeconds;
+                } else {
+                    videoElement.dataset.seekOffset = offsetInClip;
+                }
 
-                // Manual loop - seek back to offset when video ends
+                // Resolve the actual seek offset using real video duration.
+                const resolveSeekOffset = () => {
+                    const d = videoElement.duration;
+                    if (!isFinite(d) || d <= 0) return 0;
+                    if (videoElement.dataset.tailSeconds != null) {
+                        const tail = parseFloat(videoElement.dataset.tailSeconds);
+                        return Math.max(0, d - tail);
+                    }
+                    const fixed = parseFloat(videoElement.dataset.seekOffset) || 0;
+                    return Math.min(fixed, Math.max(0, d - 1));
+                };
+
+                // Manual loop — seek back using real duration so Saved events with
+                // truncated final clips don't end up stuck in a ~1s end-of-clip loop.
                 videoElement.addEventListener('ended', () => {
-                    const offset = parseFloat(videoElement.dataset.seekOffset) || 0;
-                    videoElement.currentTime = offset;
+                    videoElement.currentTime = resolveSeekOffset();
                     videoElement.play().catch(() => {});
                 });
+                videoElement._resolveSeekOffset = resolveSeekOffset;
 
                 // Insert after thumbnail so CSS hover can control visibility
                 const thumbnail = element.querySelector('.event-thumbnail');
@@ -1026,8 +1048,10 @@ class EventBrowser {
 
             // Seek to the calculated offset and play
             this.currentPreviewVideo = videoElement;
-            const seekOffset = parseFloat(videoElement.dataset.seekOffset) || 0;
-            const actualSeek = Math.min(seekOffset, Math.max(0, videoElement.duration - 1));
+            const actualSeek = videoElement._resolveSeekOffset
+                ? videoElement._resolveSeekOffset()
+                : Math.min(parseFloat(videoElement.dataset.seekOffset) || 0,
+                           Math.max(0, videoElement.duration - 1));
 
             // Set the seek position
             videoElement.currentTime = actualSeek;

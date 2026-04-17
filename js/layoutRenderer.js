@@ -169,6 +169,10 @@ class LayoutRenderer {
         if (!videoGrid || !config) return;
 
         const focusCamera = options.focusCamera || null;
+        // User-hidden cameras (via the hide toggle) must stay hidden regardless
+        // of the layout config's enabled flag. Without this, inline style.display
+        // set below overrides the .camera-hidden CSS class on every re-render.
+        const visibleCameras = options.visibleCameras || null;
 
         // Remove preset CSS classes (we're using inline styles now)
         const presetClasses = LayoutConfig.getPresetNames();
@@ -225,7 +229,10 @@ class LayoutRenderer {
 
             // Handle focus mode
             const isFocused = focusCamera && focusCamera === cameraName;
-            const shouldShow = focusCamera ? isFocused : camConfig.enabled;
+            // Respect user's hide toggle: if visibleCameras explicitly marks this
+            // camera as hidden, override the config's enabled flag.
+            const userHidden = visibleCameras && visibleCameras[cameraName] === false;
+            const shouldShow = !userHidden && (focusCamera ? isFocused : camConfig.enabled);
 
             // Position and size
             container.style.position = 'absolute';
@@ -479,7 +486,8 @@ class LayoutRenderer {
      * @param {number} videoHeight - Native video height
      * @returns {Object} Export config with pixel positions
      */
-    calculateExportConfig(config, videoWidth, videoHeight) {
+    calculateExportConfig(config, videoWidth, videoHeight, options = {}) {
+        const visibleCameras = options.visibleCameras || null;
         const aspectRatio = config.canvas?.aspectRatio || '4:3';
         const arParts = LayoutConfig.ASPECT_RATIOS[aspectRatio] || { width: 4, height: 3 };
 
@@ -519,12 +527,15 @@ class LayoutRenderer {
             if (!camConfig) continue;
 
             const pos = camConfig.position;
+            // User's hide toggle overrides the layout config's enabled flag,
+            // so hidden cameras don't appear in exports.
+            const userHidden = visibleCameras && visibleCameras[camName] === false;
             cameras[camName] = {
                 x: Math.round(canvasWidth * (pos.x / 100)),
                 y: Math.round(canvasHeight * (pos.y / 100)),
                 w: Math.round(canvasWidth * (pos.width / 100)),
                 h: Math.round(canvasHeight * (pos.height / 100)),
-                visible: camConfig.enabled,
+                visible: camConfig.enabled && !userHidden,
                 zIndex: camConfig.zIndex || 1,
                 objectFit: camConfig.objectFit || 'contain',
                 crop: camConfig.crop || { top: 0, right: 0, bottom: 0, left: 0 }

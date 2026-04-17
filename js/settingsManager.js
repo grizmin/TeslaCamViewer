@@ -780,12 +780,21 @@ class SettingsManager {
             mapProviderElement.value = window.app.mapView.getCurrentProvider();
         }
 
-        // Show branding toggle only for licensed users
+        // Show branding toggle only for Pro users. hasValidLicense() doesn't
+        // exist on sessionManager — use the canonical shouldWatermark() check
+        // (async, returns false when a valid Pro session is active).
         const brandingRow = this.modal.querySelector('#setting-row-showBrandingInExport');
         if (brandingRow) {
             const sessionManager = window.app?.sessionManager;
-            const isLicensed = sessionManager?.hasValidLicense?.() || false;
-            brandingRow.style.display = isLicensed ? 'flex' : 'none';
+            if (sessionManager?.shouldWatermark) {
+                Promise.resolve(sessionManager.shouldWatermark()).then(watermark => {
+                    brandingRow.style.display = watermark ? 'none' : 'flex';
+                }).catch(() => {
+                    brandingRow.style.display = 'none';
+                });
+            } else {
+                brandingRow.style.display = 'none';
+            }
         }
     }
 
@@ -1057,12 +1066,15 @@ class SessionManager {
     }
 
     /**
-     * Verify Ed25519 signature using Web Crypto
+     * Verify Ed25519 signature using Web Crypto, with tweetnacl fallback
      */
     async _verifySignature(message, signature, publicKey) {
+        const messageBytes = new TextEncoder().encode(message);
+        const signatureBytes = this._b64Decode(signature);
+        const keyData = this._b64Decode(publicKey);
+
+        // Try Web Crypto Ed25519 first (Chrome 113+, Safari 17+)
         try {
-            // Import the public key
-            const keyData = this._b64Decode(publicKey);
             const cryptoKey = await crypto.subtle.importKey(
                 'raw',
                 keyData,
@@ -1070,11 +1082,6 @@ class SessionManager {
                 false,
                 ['verify']
             );
-
-            // Verify the signature
-            const messageBytes = new TextEncoder().encode(message);
-            const signatureBytes = this._b64Decode(signature);
-
             return await crypto.subtle.verify(
                 'Ed25519',
                 cryptoKey,
@@ -1082,11 +1089,20 @@ class SessionManager {
                 messageBytes
             );
         } catch (e) {
-            // Ed25519 not supported in this browser, fall back to accepting
-            // This is a tradeoff - older browsers get free access
-            console.warn('Signature verification not supported:', e);
-            return false;
+            // Ed25519 not supported in Web Crypto, try tweetnacl fallback
+            console.warn('[SessionManager] Web Crypto Ed25519 unavailable, using fallback:', e.message);
         }
+
+        // Fallback: use tweetnacl (works on all browsers including Firefox)
+        try {
+            if (typeof self.nacl !== 'undefined' && self.nacl.sign && self.nacl.sign.detached) {
+                return self.nacl.sign.detached.verify(messageBytes, signatureBytes, keyData);
+            }
+        } catch (e) {
+            console.warn('[SessionManager] Fallback verification failed:', e.message);
+        }
+
+        return false;
     }
 
     /**

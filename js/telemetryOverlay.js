@@ -893,6 +893,14 @@ class TelemetryOverlay {
      * @returns {Array<{lat: number, lng: number, time: number}>} GPS points with event time
      */
     getAllGpsPoints() {
+        // Cache result — this is called per-frame during export (30fps) for outlier
+        // rejection in the mini-map trail. Cache is keyed on clipSeiData size so it
+        // invalidates when a new event loads or more SEI data is parsed.
+        const cacheKey = this.clipSeiData.size;
+        if (this._gpsPointsCache && this._gpsPointsCacheKey === cacheKey) {
+            return this._gpsPointsCache;
+        }
+
         const points = [];
         const clipDuration = 60; // Approximate clip duration in seconds
 
@@ -936,6 +944,8 @@ class TelemetryOverlay {
             }
         }
 
+        this._gpsPointsCache = points;
+        this._gpsPointsCacheKey = cacheKey;
         return points;
     }
 
@@ -1016,6 +1026,14 @@ class TelemetryOverlay {
     _updateLoop() {
         if (!this.isVisible) {
             this.animationFrame = null;
+            return;
+        }
+
+        // Skip live rendering during export — export seeks the video 30x/sec, which
+        // mutates currentData. Rendering that on the visible HUD at 60fps produces
+        // rapid value flicker. Keep the loop alive so rendering resumes after export.
+        if (window.app?.videoExport?.isExporting) {
+            this.animationFrame = requestAnimationFrame(this._updateLoop);
             return;
         }
 

@@ -502,7 +502,7 @@ class DriveSyncUI {
     updateDriveInfo(which, drive) {
         const infoEl = document.getElementById(which === 'source' ? 'sourceInfo' : 'destInfo');
         const events = drive.events || [];
-        const totalSize = events.reduce((sum, e) => sum + (e.estimatedSize || 0), 0);
+        const totalSize = events.reduce((sum, e) => sum + this.driveSync.getEventSize(e), 0);
 
         // Compact layout - just show size estimate
         infoEl.textContent = this.driveSync.formatBytes(totalSize);

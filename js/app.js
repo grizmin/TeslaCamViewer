@@ -633,45 +633,21 @@ class TeslaCamViewerApp {
                 console.log('Privacy mode export:', e.target.checked ? 'enabled' : 'disabled');
             });
 
-            // Prevent clicks on label from closing dropdown
-            const privacyModeOption = privacyModeCheckbox.closest('.privacy-mode-option');
-            if (privacyModeOption) {
-                privacyModeOption.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    // Toggle checkbox when clicking label (but not the checkbox itself)
-                    if (e.target !== privacyModeCheckbox) {
-                        privacyModeCheckbox.checked = !privacyModeCheckbox.checked;
-                        privacyModeCheckbox.dispatchEvent(new Event('change'));
-                    }
-                });
-            }
         }
 
         // Blur license plates checkbox - syncs with settings
         const blurPlatesExportCheckbox = document.getElementById('blurPlatesExportCheckbox');
         if (blurPlatesExportCheckbox) {
-            // Initialize from settings
-            blurPlatesExportCheckbox.checked = this.settingsManager.get('blurPlatesExport') === true;
+            // Initialize from settings (shared key with Settings modal and downstream export code)
+            blurPlatesExportCheckbox.checked = this.settingsManager.get('blurLicensePlates') === true;
 
             // Update settings when checkbox changes
             blurPlatesExportCheckbox.addEventListener('change', (e) => {
                 e.stopPropagation();
-                this.settingsManager.set('blurPlatesExport', e.target.checked);
+                this.settingsManager.set('blurLicensePlates', e.target.checked);
                 console.log('Blur plates export:', e.target.checked ? 'enabled' : 'disabled');
             });
 
-            // Prevent clicks on label from closing dropdown
-            const blurPlatesOption = blurPlatesExportCheckbox.closest('.export-checkbox-option');
-            if (blurPlatesOption) {
-                blurPlatesOption.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    // Toggle checkbox when clicking label (but not the checkbox itself)
-                    if (e.target !== blurPlatesExportCheckbox && e.target.tagName !== 'INPUT') {
-                        blurPlatesExportCheckbox.checked = !blurPlatesExportCheckbox.checked;
-                        blurPlatesExportCheckbox.dispatchEvent(new Event('change'));
-                    }
-                });
-            }
         }
 
         // Export format dropdown - syncs with settings
@@ -696,6 +672,22 @@ class TeslaCamViewerApp {
                 // Show/hide GIF warning
                 if (gifWarning) {
                     gifWarning.classList.toggle('hidden', e.target.value !== 'gif');
+                }
+            });
+
+            // Keep toolbar controls in sync when export settings change elsewhere (e.g. Settings modal)
+            this.settingsManager.onChange((settings) => {
+                if (exportFormatSelect.value !== settings.exportFormat) {
+                    exportFormatSelect.value = settings.exportFormat;
+                    if (gifWarning) {
+                        gifWarning.classList.toggle('hidden', settings.exportFormat !== 'gif');
+                    }
+                }
+                if (privacyModeCheckbox && privacyModeCheckbox.checked !== (settings.privacyModeExport === true)) {
+                    privacyModeCheckbox.checked = settings.privacyModeExport === true;
+                }
+                if (blurPlatesExportCheckbox && blurPlatesExportCheckbox.checked !== (settings.blurLicensePlates === true)) {
+                    blurPlatesExportCheckbox.checked = settings.blurLicensePlates === true;
                 }
             });
 
@@ -730,16 +722,12 @@ class TeslaCamViewerApp {
             });
         });
 
-        // Prevent checkbox options from closing dropdown
+        // Prevent checkbox options from closing dropdown.
+        // The option is a <label> wrapping the checkbox, so the browser natively
+        // toggles the checkbox on click — don't toggle manually or it double-fires.
         this.exportDropdown.querySelectorAll('.export-checkbox-option').forEach(option => {
             option.addEventListener('click', (e) => {
                 e.stopPropagation();
-                // Toggle checkbox when clicking anywhere in the option
-                const checkbox = option.querySelector('input[type="checkbox"]');
-                if (checkbox && e.target !== checkbox) {
-                    checkbox.checked = !checkbox.checked;
-                    checkbox.dispatchEvent(new Event('change'));
-                }
             });
         });
 
@@ -859,7 +847,23 @@ class TeslaCamViewerApp {
         this.layoutSelect.addEventListener('change', (e) => {
             const layout = e.target.value;
             this.layoutManager.setLayout(layout);
+            // Show reset button when cameras have been swapped
+            const resetBtn = document.getElementById('resetLayoutBtn');
+            if (resetBtn) resetBtn.style.display = 'none';
         });
+
+        // Reset layout button — restores camera positions after drag-swap
+        const resetLayoutBtn = document.getElementById('resetLayoutBtn');
+        if (resetLayoutBtn) {
+            resetLayoutBtn.addEventListener('click', () => {
+                this.layoutManager.resetCameraOrder();
+                resetLayoutBtn.style.display = 'none';
+            });
+            // If we restored a modified layout from localStorage, show the button
+            if (this.layoutManager._configModified) {
+                resetLayoutBtn.style.display = '';
+            }
+        }
 
         // Focus camera selector
         this.focusCameraSelect.addEventListener('change', (e) => {
@@ -3346,6 +3350,11 @@ class TeslaCamViewerApp {
         // Declare cancelHandler in outer scope so catch block can access it
         let cancelHandler = null;
 
+        // Auto-detect focused camera in Focus Mode
+        if (camera === 'all' && this.layoutManager?.currentLayout === 'layout-focus') {
+            camera = this.layoutManager.focusCamera || 'front';
+        }
+
         try {
             if (this.videoExport?.isExporting) {
                 alert('An export is already in progress. Please wait for it to complete.');
@@ -3361,9 +3370,26 @@ class TeslaCamViewerApp {
                 front: 'front camera',
                 back: 'rear camera',
                 left_repeater: 'left camera',
-                right_repeater: 'right camera'
+                right_repeater: 'right camera',
+                left_pillar: 'left pillar camera',
+                right_pillar: 'right pillar camera'
             };
             const cameraLabel = cameraLabels[camera] || camera;
+
+            // Determine export range
+            // OUT-only means "from start of event to OUT marker"
+            // IN-only means "from IN marker to end of event"
+            // Both means "from IN to OUT"
+            // Neither means "from current position to end of event"
+            let exportStartTime;
+            if (marks.inPoint !== null) {
+                exportStartTime = marks.inPoint;
+            } else if (marks.outPoint !== null) {
+                exportStartTime = 0; // OUT-only: start from beginning
+            } else {
+                exportStartTime = currentAbsoluteTime;
+            }
+            const exportEndTime = marks.outPoint;
 
             // Determine what will be exported
             let exportDescription;
@@ -3372,7 +3398,7 @@ class TeslaCamViewerApp {
             } else if (marks.inPoint !== null) {
                 exportDescription = `from IN marker to end of event - ${cameraLabel}`;
             } else if (marks.outPoint !== null) {
-                exportDescription = `from current position to OUT marker - ${cameraLabel}`;
+                exportDescription = `from start to OUT marker - ${cameraLabel}`;
             } else {
                 exportDescription = `from current position to end of event - ${cameraLabel}`;
             }
@@ -3385,10 +3411,6 @@ class TeslaCamViewerApp {
             if (!confirm(message)) {
                 return;
             }
-
-            // Determine export range
-            const exportStartTime = marks.inPoint !== null ? marks.inPoint : currentAbsoluteTime;
-            const exportEndTime = marks.outPoint;
 
             // Validate export range
             if (exportEndTime !== null && exportStartTime >= exportEndTime) {
@@ -3533,7 +3555,7 @@ class TeslaCamViewerApp {
             const exportFormatSelect = document.getElementById('exportFormatSelect');
             const format = exportFormatSelect ? exportFormatSelect.value : this.settingsManager.get('exportFormat');
 
-            // Export current layout using frame-by-frame for stable, stutter-free output
+            // Unified export path: single-camera is just a one-camera layout override
             await this.videoExport.exportFrameByFrame({
                 format: format,
                 quality: 0.9,
@@ -3541,7 +3563,8 @@ class TeslaCamViewerApp {
                 endTime: exportEndTime,
                 includeOverlay: true,
                 fps: 30,
-                onProgress: progressCallback
+                onProgress: progressCallback,
+                singleCamera: camera !== 'all' ? camera : null
             });
 
             // Remove cancel handler (cancelBtn is stable, not recreated)
@@ -4578,8 +4601,42 @@ class TeslaCamViewerApp {
     setupTelemetryUpdateHandler() {
         if (!this.telemetryOverlay) return;
 
+        // Idempotency guard: this function is called every time an event loads
+        // (inside the SEI extraction block). Without this, each call creates a
+        // fresh closure and the old RAF callback keeps running alongside the
+        // new one, multiplying loops on every event switch.
+        if (this._telemetryHandlerInstalled) {
+            this._telemetryStart?.();
+            return;
+        }
+        this._telemetryHandlerInstalled = true;
+
+        // Guard against duplicate RAF loops. Each overlay's show() schedules
+        // a fresh requestAnimationFrame; without this check, toggling overlays
+        // or re-rendering layouts could spawn multiple parallel loops.
+        this._telemetryRafId = null;
+        const start = () => {
+            if (this._telemetryRafId != null) return; // already scheduled
+            this._telemetryRafId = requestAnimationFrame(updateTelemetry);
+        };
+        this._telemetryStart = start;
+
         // Use requestAnimationFrame for smooth updates
         const updateTelemetry = () => {
+            this._telemetryRafId = null;
+            // During export the export pipeline drives telemetry/mini-map updates itself.
+            // Running the live loop in parallel causes HUD/map flicker (60fps RAF repaints
+            // on top of export frames) and poisons the mini-map trail with unfiltered bad
+            // GPS samples that race with our filtered updatePositionForExport calls.
+            if (this.videoExport?.isExporting) {
+                const mmVis = this.miniMapOverlay && this.miniMapOverlay.isVisible;
+                const svVis = this.streetViewOverlay && this.streetViewOverlay.isVisible;
+                if (this.telemetryOverlay.isVisible || mmVis || svVis) {
+                    start();
+                }
+                return;
+            }
+
             if (this.videoPlayer && this.telemetryOverlay.isVisible) {
                 const clipIndex = this.videoPlayer.currentClipIndex || 0;
                 const timeInClip = this.videoPlayer.getCurrentTime() || 0;
@@ -4674,7 +4731,7 @@ class TeslaCamViewerApp {
             }
 
             if (this.telemetryOverlay.isVisible || miniMapVisible || streetViewVisible) {
-                requestAnimationFrame(updateTelemetry);
+                start();
             }
         };
 
@@ -4682,14 +4739,14 @@ class TeslaCamViewerApp {
         const miniMapVisible = this.miniMapOverlay && this.miniMapOverlay.isVisible;
         const streetViewVisible = this.streetViewOverlay && this.streetViewOverlay.isVisible;
         if (this.telemetryOverlay.isVisible || miniMapVisible || streetViewVisible) {
-            requestAnimationFrame(updateTelemetry);
+            start();
         }
 
         // Restart loop when telemetry overlay is shown
         const originalShow = this.telemetryOverlay.show.bind(this.telemetryOverlay);
         this.telemetryOverlay.show = () => {
             originalShow();
-            requestAnimationFrame(updateTelemetry);
+            start();
         };
 
         // Also restart loop when mini-map is shown
@@ -4697,7 +4754,7 @@ class TeslaCamViewerApp {
             const originalMiniMapShow = this.miniMapOverlay.show.bind(this.miniMapOverlay);
             this.miniMapOverlay.show = () => {
                 originalMiniMapShow();
-                requestAnimationFrame(updateTelemetry);
+                start();
             };
         }
 
@@ -4706,7 +4763,7 @@ class TeslaCamViewerApp {
             const originalStreetViewShow = this.streetViewOverlay.show.bind(this.streetViewOverlay);
             this.streetViewOverlay.show = () => {
                 originalStreetViewShow();
-                requestAnimationFrame(updateTelemetry);
+                start();
                 this._updateOverlayButtonStates();
             };
         }

@@ -328,7 +328,8 @@ class DriveSync {
 
                 totalSourceSize: 0,
                 totalDestFree: 0,
-                selectedSize: 0
+                selectedSize: 0,
+                warnings: []
             };
 
             // Compare source events
@@ -338,6 +339,9 @@ class DriveSync {
                 if (!destEvent) {
                     // Missing on destination
                     const fingerprint = await this.getEventFingerprint(sourceEvent);
+                    if (fingerprint.partial) {
+                        results.warnings.push(`${sourceEvent.name}: partial scan — ${fingerprint.error}`);
+                    }
                     results.missing.push({
                         event: sourceEvent,
                         fingerprint,
@@ -348,6 +352,12 @@ class DriveSync {
                     // Exists on both - compare
                     const sourceFingerprint = await this.getEventFingerprint(sourceEvent);
                     const destFingerprint = await this.getEventFingerprint(destEvent);
+                    if (sourceFingerprint.partial) {
+                        results.warnings.push(`${sourceEvent.name} (source): partial scan — ${sourceFingerprint.error}`);
+                    }
+                    if (destFingerprint.partial) {
+                        results.warnings.push(`${destEvent.name} (dest): partial scan — ${destFingerprint.error}`);
+                    }
 
                     const comparison = this.compareFingerprints(sourceFingerprint, destFingerprint);
 
@@ -409,6 +419,7 @@ class DriveSync {
 
     async getEventFingerprint(event) {
         const files = [];
+        let partialError = null;
 
         try {
             for await (const entry of event.folderHandle.values()) {
@@ -421,18 +432,18 @@ class DriveSync {
                         handle: entry
                     });
 
-                    // Load metadata if not already loaded (for cached events)
                     if (entry.name === 'event.json' && !event.metadata) {
                         try {
                             const text = await file.text();
                             event.metadata = JSON.parse(text);
                         } catch (e) {
-                            console.warn('Failed to load event.json:', e);
+                            console.warn('Unable to load event.json:', e);
                         }
                     }
                 }
             }
         } catch (error) {
+            partialError = error.message;
             console.error('Error getting fingerprint for', event.name, error);
         }
 
@@ -442,7 +453,9 @@ class DriveSync {
             fileCount: files.length,
             totalSize: files.reduce((sum, f) => sum + f.size, 0),
             newestFile: files.length > 0 ? Math.max(...files.map(f => f.lastModified)) : 0,
-            files: files.sort((a, b) => a.name.localeCompare(b.name))
+            files: files.sort((a, b) => a.name.localeCompare(b.name)),
+            partial: !!partialError,
+            error: partialError
         };
     }
 
@@ -833,6 +846,11 @@ class DriveSync {
         // Ensure permissions
         await this.ensurePermissions();
 
+        // Note: we intentionally don't pre-check free space on the destination.
+        // navigator.storage.estimate() reports the browser's origin quota
+        // (IndexedDB/OPFS), not the USB drive's free space — it's the wrong tool.
+        // Out-of-space conditions are surfaced as write errors during copyFile.
+
         // Initialize state
         this.abortController = new AbortController();
         this.isPaused = false;
@@ -921,6 +939,10 @@ class DriveSync {
                 await this.writeSyncSettings();
             }
 
+            // Refresh destination drive's event list so the next Compare
+            // sees the newly-copied events instead of the stale pre-sync list.
+            await this.refreshDriveEvents(this.destDrive);
+
             this.setState({
                 status: 'complete',
                 currentEvent: null,
@@ -943,6 +965,26 @@ class DriveSync {
             }
 
             throw error;
+        }
+    }
+
+    async refreshDriveEvents(drive) {
+        if (!drive?.handle) return;
+        const parser = window.app?.folderParser;
+        if (!parser) {
+            const msg = 'Unable to refresh destination event list — folderParser unavailable. Next Compare may incorrectly show just-synced events as "missing".';
+            console.warn('[DriveSync]', msg);
+            this.state.errors.push({ event: drive.label || 'destination', error: msg });
+            return;
+        }
+        try {
+            console.log(`[DriveSync] Refreshing event list for ${drive.label}...`);
+            await this.folderManager.parseSingleDrive(parser, drive.id);
+            console.log(`[DriveSync] ${drive.label} now has ${drive.events?.length} events`);
+        } catch (e) {
+            const msg = `Unable to refresh destination event list: ${e.message}`;
+            console.warn('[DriveSync]', msg);
+            this.state.errors.push({ event: drive.label || 'destination', error: msg });
         }
     }
 
@@ -990,21 +1032,30 @@ class DriveSync {
                 currentFileTotal: fileInfo.size
             });
 
-            await this.copyFile(fileInfo.handle, destEventFolder, (bytesWritten, totalBytes) => {
-                this.setState({
-                    currentFileBytes: bytesWritten,
-                    bytesCompleted: this.state.bytesCompleted + bytesWritten - (this.state.currentFileBytes || 0)
+            // Snapshot the total before this file so we can reconcile correctly
+            // whether the copy completes or throws mid-file.
+            const bytesBeforeFile = this.state.bytesCompleted;
+
+            try {
+                await this.copyFile(fileInfo.handle, destEventFolder, (bytesWritten, totalBytes) => {
+                    this.setState({
+                        currentFileBytes: bytesWritten,
+                        bytesCompleted: bytesBeforeFile + bytesWritten
+                    });
+
+                    if (this.onProgressCallback) {
+                        this.onProgressCallback(this.state);
+                    }
                 });
 
-                if (this.onProgressCallback) {
-                    this.onProgressCallback(this.state);
-                }
-            });
-
-            // Update completed bytes
-            this.setState({
-                bytesCompleted: this.state.bytesCompleted + fileInfo.size - (this.state.currentFileBytes || 0)
-            });
+                // Success — land exactly on fileInfo.size of progress for this file
+                this.setState({ bytesCompleted: bytesBeforeFile + fileInfo.size });
+            } catch (error) {
+                // Copy failed — rewind progress since the partial file has been
+                // removed by copyFile's catch block; no bytes were successfully synced.
+                this.setState({ bytesCompleted: bytesBeforeFile, currentFileBytes: 0 });
+                throw error;
+            }
         }
     }
 
@@ -1015,9 +1066,16 @@ class DriveSync {
 
         const reader = file.stream().getReader();
         let bytesWritten = 0;
+        let completed = false;
 
         try {
             while (true) {
+                if (this.abortController?.signal.aborted) {
+                    reader.cancel();
+                    await writable.abort();
+                    throw new Error('Sync cancelled');
+                }
+
                 const { done, value } = await reader.read();
                 if (done) break;
 
@@ -1030,10 +1088,18 @@ class DriveSync {
             }
 
             await writable.close();
+            completed = true;
             return destFile;
 
         } catch (error) {
-            await writable.abort();
+            try { await writable.abort(); } catch (_) {}
+            // getFileHandle(..., {create: true}) created a 0-byte file before
+            // createWritable. If the copy didn't finish, remove that stub so the
+            // next Compare doesn't flag a "different size" and loop re-copying
+            // a file that consistently fails.
+            if (!completed) {
+                try { await destDir.removeEntry(file.name); } catch (_) {}
+            }
             throw error;
         }
     }
@@ -1079,8 +1145,17 @@ class DriveSync {
             return this.buffersEqual(sourceBuffer, destBuffer);
         }
 
-        // Size match is sufficient for large files
-        return true;
+        // Head+tail checksum for large files (first and last 1MB).
+        // Reading the full file would be too slow for multi-GB video clips.
+        const SAMPLE_SIZE = 1024 * 1024;
+        const sourceHead = await sourceFile.slice(0, SAMPLE_SIZE).arrayBuffer();
+        const destHead = await destFile.slice(0, SAMPLE_SIZE).arrayBuffer();
+        if (!this.buffersEqual(sourceHead, destHead)) return false;
+
+        const tailStart = Math.max(0, sourceFile.size - SAMPLE_SIZE);
+        const sourceTail = await sourceFile.slice(tailStart).arrayBuffer();
+        const destTail = await destFile.slice(tailStart).arrayBuffer();
+        return this.buffersEqual(sourceTail, destTail);
     }
 
     buffersEqual(buf1, buf2) {
@@ -1097,10 +1172,8 @@ class DriveSync {
     }
 
     async deleteSourceEvent(event) {
-        if (!this.settings.confirmBeforeDelete) {
-            // This should be confirmed in UI before calling
-        }
-
+        // Note: UI is expected to have confirmed before calling this —
+        // settings.confirmBeforeDelete gates the UI prompt, not this method.
         try {
             const typeFolder = await this.sourceDrive.handle.getDirectoryHandle(event.type);
             await typeFolder.removeEntry(event.name, { recursive: true });

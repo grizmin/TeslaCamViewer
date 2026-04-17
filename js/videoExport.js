@@ -91,7 +91,8 @@ class VideoExport {
             const layoutConfig = this.layoutManager.getCurrentConfig();
             if (layoutConfig) {
                 const exportConfig = this.layoutManager.renderer.calculateExportConfig(
-                    layoutConfig, videoWidth, videoHeight
+                    layoutConfig, videoWidth, videoHeight,
+                    { visibleCameras: this.layoutManager.getVisibleCameras() }
                 );
                 console.log('Export layout config:', layoutConfig.name, exportConfig);
                 return exportConfig;
@@ -185,12 +186,13 @@ class VideoExport {
             endTime = null,
             includeOverlay = true,
             onProgress = null,
-            fps = 30
+            fps = 30,
+            singleCamera = null
         } = options;
 
-        // Handle GIF export separately
+        // Handle GIF export separately (forward singleCamera so GIF path also honors it)
         if (format === 'gif') {
-            return this.exportAsGif(options);
+            return this.exportAsGif({ ...options, singleCamera });
         }
 
         console.log('Starting buffered frame-by-frame export...');
@@ -205,9 +207,10 @@ class VideoExport {
         this.recordedChunks = [];
 
         const videos = this.videoPlayer.videos;
-        if (!videos.front.src) {
+        const primaryCamera = singleCamera || 'front';
+        if (!videos[primaryCamera] || !videos[primaryCamera].src) {
             this.isExporting = false;
-            throw new Error('No video loaded');
+            throw new Error(`No video loaded${singleCamera ? ` for ${singleCamera}` : ''}`);
         }
 
         // Pause any playback
@@ -230,55 +233,47 @@ class VideoExport {
 
         console.log(`Buffered export: ${totalFrames} frames @ ${fps}fps, ${exportStart.toFixed(2)}s to ${exportEnd.toFixed(2)}s`);
 
-        // Get video dimensions
-        const videoWidth = videos.front.videoWidth || 1280;
-        const videoHeight = videos.front.videoHeight || 960;
+        // Get video dimensions (reference from the primary camera)
+        const refVideo = videos[primaryCamera];
+        const videoWidth = refVideo.videoWidth || 1280;
+        const videoHeight = refVideo.videoHeight || 960;
 
-        // Get layout config with proper dimensions
-        const layoutConfig = this.getLayoutConfig(videoWidth, videoHeight);
+        // Get layout config — single-camera mode synthesizes a fullscreen one-camera layout
+        // so the rest of the pipeline treats it identically to any other layout (6:3, 2x2, etc.)
+        let layoutConfig;
+        if (singleCamera) {
+            layoutConfig = {
+                canvasWidth: videoWidth,
+                canvasHeight: videoHeight,
+                cameras: {
+                    [singleCamera]: {
+                        x: 0, y: 0, w: videoWidth, h: videoHeight,
+                        visible: true, zIndex: 1,
+                        crop: { top: 0, right: 0, bottom: 0, left: 0 },
+                        objectFit: 'contain'
+                    }
+                }
+            };
+        } else {
+            layoutConfig = this.getLayoutConfig(videoWidth, videoHeight);
+        }
         const canvasWidth = layoutConfig.canvasWidth || 1920;
         const canvasHeight = layoutConfig.canvasHeight || 1080;
 
-        console.log(`Canvas size: ${canvasWidth}x${canvasHeight}`);
+        console.log(`Canvas size: ${canvasWidth}x${canvasHeight}${singleCamera ? ` (single-camera: ${singleCamera})` : ''}`);
 
         // Note: We skip pre-rendering telemetry and use on-demand rendering instead.
         // On-demand rendering uses the video player's actual clip/time state, which ensures
         // the telemetry matches exactly what the user saw during preview.
         // Pre-rendering had timing drift issues due to clip duration estimation.
 
-        // Get camera mapping
-        const cameraMapping = this.buildCameraMapping();
+        // Get camera mapping (single-camera mode bypasses position remapping)
+        const cameraMapping = singleCamera
+            ? { [singleCamera]: singleCamera }
+            : this.buildCameraMapping();
 
-        // Pre-cache mini-map tiles if mini-map export is enabled
-        const settings = window.app?.settingsManager;
-        const miniMapInExport = settings && settings.get('miniMapInExport') !== false;
-        if (window.app?.miniMapOverlay && miniMapInExport && window.app.telemetryOverlay?.hasTelemetryData()) {
-            console.log('Pre-caching mini-map tiles...');
-            // Clear trail before export to start fresh
-            window.app.miniMapOverlay.clearTrail();
-            try {
-                // Gather all GPS positions from telemetry for the export range
-                const positions = [];
-                const sampleInterval = 1; // Sample every 1 second
-                for (let t = exportStart; t <= exportEnd; t += sampleInterval) {
-                    await this.videoPlayer.seekToEventTime(t);
-                    const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                    const timeInClip = this.videoPlayer.getCurrentTime() || 0;
-                    const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
-                    window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-                    const data = window.app.telemetryOverlay.currentData;
-                    if (data?.latitude_deg && data?.longitude_deg) {
-                        positions.push({ lat: data.latitude_deg, lng: data.longitude_deg });
-                    }
-                }
-                // Pre-cache tiles for all positions
-                await window.app.miniMapOverlay.preCacheTilesForExport(positions);
-                // Seek back to export start
-                await this.videoPlayer.seekToEventTime(exportStart);
-            } catch (e) {
-                console.warn('Failed to pre-cache mini-map tiles:', e);
-            }
-        }
+        // Pre-cache mini-map tiles (shared method)
+        await this._preCacheMiniMapTiles(exportStart, exportEnd);
 
         // Phase 1: Render all frames to ImageData buffer
         console.log('Phase 1: Rendering frames to buffer...');
@@ -304,12 +299,12 @@ class VideoExport {
                 renderCtx.fillStyle = '#000000';
                 renderCtx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-                if (frameReady) {
-                    // Draw cameras sorted by z-index (lower z-index first, so higher ones are on top)
-                    const sortedCameras = Object.entries(layoutConfig.cameras)
-                        .filter(([name, cam]) => cam.visible && cam.w > 0 && cam.h > 0)
-                        .sort((a, b) => (a[1].zIndex || 1) - (b[1].zIndex || 1));
+                // Build sorted cameras list outside frameReady check so plate blur can access it
+                const sortedCameras = Object.entries(layoutConfig.cameras)
+                    .filter(([name, cam]) => cam.visible && cam.w > 0 && cam.h > 0)
+                    .sort((a, b) => (a[1].zIndex || 1) - (b[1].zIndex || 1));
 
+                if (frameReady) {
                     for (const [camPosition, camConfig] of sortedCameras) {
                         const actualCameraName = cameraMapping[camPosition];
                         const video = videos[actualCameraName];
@@ -401,46 +396,8 @@ class VideoExport {
                     this.addOverlay(renderCtx, canvasWidth, canvasHeight, absoluteTime);
                 }
 
-                // Add telemetry overlay using video player's actual state (skipped in privacy mode)
-                // This ensures telemetry matches exactly what the user saw during preview
-                const telemetryEnabled = !settings || settings.get('telemetryOverlayInExport') !== false;
-
-                if (!privacyMode && window.app?.telemetryOverlay && telemetryEnabled && window.app.telemetryOverlay.hasTelemetryData()) {
-                    // Use video player's current clip/time (set by seekToEventTime during frame rendering)
-                    const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                    const timeInClip = this.videoPlayer.getCurrentTime() || 0;
-                    const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
-
-                    // Update telemetry data for current position
-                    window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-
-                    // Get the updated telemetry data and render to canvas
-                    const telemetryData = window.app.telemetryOverlay.getCurrentTelemetry();
-                    if (telemetryData) {
-                        // Debug: log telemetry changes every 30 frames (1 second)
-                        if (frameNum % 30 === 0) {
-                            console.log(`[Export] Frame ${frameNum}: clip=${clipIndex}, time=${timeInClip.toFixed(2)}, AP=${telemetryData.autopilot_name}, brake=${telemetryData.brake_applied}, gY=${(telemetryData.g_force_y || 0).toFixed(2)}`);
-                        }
-                        const blinkState = frameNum % 30 < 15; // 1 second blink cycle
-                        // HUD scale uses smaller reference (1000px) to appear larger/closer to live view
-                        const hudScale = canvasWidth / 1000;
-                        window.app.telemetryOverlay.renderToCanvas(renderCtx, canvasWidth, canvasHeight, telemetryData, {
-                            blinkState,
-                            scale: hudScale
-                        });
-
-                        // Add mini-map overlay if export setting is enabled (skipped in privacy mode)
-                        const miniMapInExport = !settings || settings.get('miniMapInExport') !== false;
-                        if (window.app?.miniMapOverlay && miniMapInExport && telemetryData.latitude_deg && telemetryData.longitude_deg) {
-                            window.app.miniMapOverlay.updatePositionForExport(
-                                telemetryData.latitude_deg,
-                                telemetryData.longitude_deg,
-                                telemetryData.heading_deg || 0
-                            );
-                            window.app.miniMapOverlay.drawToCanvas(renderCtx, canvasWidth, canvasHeight);
-                        }
-                    }
-                }
+                // Telemetry HUD and mini-map (shared with all export paths)
+                this._renderTelemetryAndMap(renderCtx, canvasWidth, canvasHeight, absoluteTime, { privacyMode });
 
                 // Store frame as ImageBitmap (more efficient than ImageData)
                 const bitmap = await createImageBitmap(renderCanvas);
@@ -533,7 +490,10 @@ class VideoExport {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `TeslaCam_Export_${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.${format === 'mp4' ? 'mp4' : 'webm'}`;
+            const labelMap = { front: 'front', back: 'rear', left_repeater: 'left', right_repeater: 'right', left_pillar: 'left-pillar', right_pillar: 'right-pillar' };
+            const camLabel = singleCamera ? `_${labelMap[singleCamera] || singleCamera}` : '';
+            const ext = format === 'mp4' ? 'mp4' : 'webm';
+            a.download = `TeslaCam_Export${camLabel}_${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.${ext}`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -690,6 +650,12 @@ class VideoExport {
                 }
             }
             console.log('Clip duration caching complete:', this.cachedClipDurations.length, 'clips');
+
+            // Pre-cache mini-map tiles (shared method)
+            const compositeExportStart = startTime !== null ? startTime : 0;
+            const compositeExportEnd = endTime !== null ? endTime : this.cachedTotalDuration;
+            await this._preCacheMiniMapTiles(compositeExportStart, compositeExportEnd);
+
             // Create canvas for composite
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
@@ -712,15 +678,30 @@ class VideoExport {
             // Pre-cache crop and object-fit calculations for each camera (performance optimization)
             const cachedCropValues = {};
             const cachedDestRects = {};
+
+            // Wait for video metadata to be loaded before caching draw params
+            const waitForMetadata = async (video, timeout = 3000) => {
+                if (video.videoWidth > 0) return true;
+                return new Promise(resolve => {
+                    const timer = setTimeout(() => resolve(false), timeout);
+                    video.addEventListener('loadedmetadata', () => {
+                        clearTimeout(timer);
+                        resolve(true);
+                    }, { once: true });
+                });
+            };
+
+            // Ensure all visible videos have metadata loaded
             for (const [camName, camConfig] of Object.entries(layoutConfig.cameras)) {
-                // Use mapping to get correct video for this position
                 const videoSource = cameraMapping[camName] || camName;
                 const video = videos[videoSource];
                 if (video && camConfig.visible) {
-                    // Use centralized calculation and cache the results
-                    const params = LayoutRenderer.calculateDrawParams(video, camConfig);
-                    cachedCropValues[camName] = { sx: params.sx, sy: params.sy, sw: params.sw, sh: params.sh };
-                    cachedDestRects[camName] = { dx: params.dx, dy: params.dy, dw: params.dw, dh: params.dh };
+                    await waitForMetadata(video);
+                    if (video.videoWidth > 0) {
+                        const params = LayoutRenderer.calculateDrawParams(video, camConfig);
+                        cachedCropValues[camName] = { sx: params.sx, sy: params.sy, sw: params.sw, sh: params.sh };
+                        cachedDestRects[camName] = { dx: params.dx, dy: params.dy, dw: params.dw, dh: params.dh };
+                    }
                 }
             }
             console.log('Cached crop values for', Object.keys(cachedCropValues).length, 'cameras');
@@ -998,6 +979,16 @@ class VideoExport {
                         const framesWaited = 90 - skipFramesAfterClipChange;
                         console.log('   Videos ready after', framesWaited, 'frames (~' + (framesWaited / 30).toFixed(1) + 's)');
                         skipFramesAfterClipChange = 0;
+                        // Refresh crop cache - video elements changed after clip transition
+                        for (const [camName, camConfig] of Object.entries(layoutConfig.cameras)) {
+                            const videoSource = cameraMapping[camName] || camName;
+                            const video = videos[videoSource];
+                            if (video && camConfig.visible && video.videoWidth > 0) {
+                                const params = LayoutRenderer.calculateDrawParams(video, camConfig);
+                                cachedCropValues[camName] = { sx: params.sx, sy: params.sy, sw: params.sw, sh: params.sh };
+                                cachedDestRects[camName] = { dx: params.dx, dy: params.dy, dw: params.dw, dh: params.dh };
+                            }
+                        }
                     } else if (skipFramesAfterClipChange > 0) {
                         // Still waiting - render black frame and continue loop
                         if (skipFramesAfterClipChange % 15 === 0) {
@@ -1184,8 +1175,14 @@ class VideoExport {
                             // Draw with pre-cached crop and object-fit values
                             ctx.drawImage(video, cached.sx, cached.sy, cached.sw, cached.sh, dest.dx, dest.dy, dest.dw, dest.dh);
                         } else {
-                            // Fallback: draw without crop/fit if cache miss
-                            ctx.drawImage(video, camConfig.x, camConfig.y, camConfig.w, camConfig.h);
+                            // Cache miss - calculate draw params on the fly
+                            const params = LayoutRenderer.calculateDrawParams(video, camConfig);
+                            ctx.drawImage(video, params.sx, params.sy, params.sw, params.sh, params.dx, params.dy, params.dw, params.dh);
+                            // Populate cache for subsequent frames
+                            if (video.videoWidth > 0) {
+                                cachedCropValues[camName] = { sx: params.sx, sy: params.sy, sw: params.sw, sh: params.sh };
+                                cachedDestRects[camName] = { dx: params.dx, dy: params.dy, dw: params.dw, dh: params.dh };
+                            }
                         }
                     } else {
                         // Draw "No Signal" placeholder for missing/ended cameras
@@ -1281,34 +1278,8 @@ class VideoExport {
                     this.addOverlay(ctx, canvas.width, canvas.height, absoluteTime);
                 }
 
-                // Add telemetry overlay using video player's actual state (skipped in privacy mode)
-                const telemetryEnabled = !settings || settings.get('telemetryOverlayInExport') !== false;
-                if (!privacyMode && window.app?.telemetryOverlay && telemetryEnabled && window.app.telemetryOverlay.hasTelemetryData()) {
-                    const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                    const timeInClip = this.videoPlayer.getCurrentTime() || 0;
-                    const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
-                    window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-                    const telemetryData = window.app.telemetryOverlay.getCurrentTelemetry();
-                    if (telemetryData) {
-                        const blinkState = Math.floor(absoluteTime * 2) % 2 === 0; // 1 second blink cycle
-                        // HUD scale uses smaller reference (1000px) to appear larger/closer to live view
-                        const hudScale = canvas.width / 1000;
-                        window.app.telemetryOverlay.renderToCanvas(ctx, canvas.width, canvas.height, telemetryData, {
-                            blinkState,
-                            scale: hudScale
-                        });
-
-                        // Add mini-map overlay if export setting is enabled (skipped in privacy mode)
-                        if (window.app?.miniMapOverlay && miniMapInExport && telemetryData.latitude_deg && telemetryData.longitude_deg) {
-                            window.app.miniMapOverlay.updatePositionForExport(
-                                telemetryData.latitude_deg,
-                                telemetryData.longitude_deg,
-                                telemetryData.heading_deg || 0
-                            );
-                            window.app.miniMapOverlay.drawToCanvas(ctx, canvas.width, canvas.height);
-                        }
-                    }
-                }
+                // Telemetry HUD and mini-map (shared with all export paths)
+                this._renderTelemetryAndMap(ctx, canvas.width, canvas.height, absoluteTime, { privacyMode });
 
                 // No need to schedule next frame - setInterval handles it
             };
@@ -1430,508 +1401,6 @@ class VideoExport {
         });
     }
 
-    /**
-     * Export single camera view
-     * @param {string} camera - Camera name (front, back, left_repeater, right_repeater, left_pillar, right_pillar)
-     * @param {Object} options - Export options
-     */
-    async exportSingle(camera, options = {}) {
-        const {
-            format = 'webm',
-            startTime = null,
-            endTime = null,
-            includeOverlay = true,
-            onProgress = null,
-            speed = 1
-        } = options;
-
-        this.onProgress = onProgress;
-        this.exportStartTime = Date.now();
-        this.exportSpeed = speed;
-
-        console.log('VideoExport.exportSingle called', { camera, format, startTime, endTime, speed });
-
-        if (this.isExporting) {
-            throw new Error('Export already in progress');
-        }
-
-        const video = this.videoPlayer.videos[camera];
-        if (!video || !video.src) {
-            throw new Error(`No video loaded for ${camera}`);
-        }
-
-        return new Promise(async (resolve, reject) => {
-            this.exportResolve = resolve;
-            this.exportReject = reject;
-
-            try {
-                await this.startSingleExport(camera, format, startTime, endTime, includeOverlay);
-            } catch (error) {
-                this.isExporting = false;
-                reject(error);
-            }
-        });
-    }
-
-    /**
-     * Internal method to start single camera export
-     */
-    async startSingleExport(camera, format, startTime, endTime, includeOverlay) {
-        const video = this.videoPlayer.videos[camera];
-
-        this.isExporting = true;
-        this.recordedChunks = [];
-        this.cachedTotalDuration = await this.videoPlayer.getTotalDuration();
-
-        // Cache clip durations
-        this.cachedClipDurations = [];
-        const event = this.videoPlayer.currentEvent;
-        for (let i = 0; i < event.clipGroups.length; i++) {
-            const clipGroup = event.clipGroups[i];
-            const clip = clipGroup.clips[camera] || clipGroup.clips.front;
-            if (clip && clip.fileHandle) {
-                try {
-                    const file = await clip.fileHandle.getFile();
-                    const tempVideo = document.createElement('video');
-                    const url = URL.createObjectURL(file);
-                    tempVideo.src = url;
-                    const duration = await new Promise((resolve) => {
-                        tempVideo.onloadedmetadata = () => resolve(tempVideo.duration || 60);
-                    });
-                    tempVideo.src = '';
-                    URL.revokeObjectURL(url);
-                    this.cachedClipDurations[i] = duration;
-                } catch {
-                    this.cachedClipDurations[i] = 60;
-                }
-            } else {
-                this.cachedClipDurations[i] = 60;
-            }
-        }
-
-        // Create canvas for single camera (native resolution)
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-
-        // Determine export duration
-        const exportStart = startTime !== null ? startTime : 0;
-        const exportEnd = endTime !== null ? endTime : this.cachedTotalDuration;
-        const exportDuration = exportEnd - exportStart;
-
-        console.log('Single export range:', exportStart.toFixed(2), '->', exportEnd.toFixed(2));
-
-        // Note: Telemetry is rendered on-demand using video player's actual state
-        // This ensures telemetry matches exactly what the user sees during preview
-
-        // Seek to start
-        const wasPlaying = this.videoPlayer.getIsPlaying();
-        if (wasPlaying) await this.videoPlayer.pause();
-
-        const prerollTime = 1.0;
-        const seekTarget = Math.max(0, exportStart - prerollTime);
-        await this.videoPlayer.seekToEventTime(seekTarget);
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Setup MediaRecorder
-        const mimeType = format === 'mp4' ? 'video/mp4' : 'video/webm';
-        const stream = canvas.captureStream(30);
-        const supportedMimeType = this.getSupportedMimeType(mimeType);
-
-        this.mediaRecorder = new MediaRecorder(stream, {
-            mimeType: supportedMimeType,
-            videoBitsPerSecond: 8000000 // 8 Mbps for single camera (higher quality)
-        });
-
-        this.mediaRecorder.ondataavailable = (event) => {
-            if (event.data.size > 0) {
-                this.recordedChunks.push(event.data);
-            }
-        };
-
-        let lastClipIndex = this.videoPlayer.currentClipIndex;
-        let exportStopped = false;
-        let skipFramesAfterClipChange = 0; // Wait for clip to load after transition
-        let stallFrameCount = 0; // Track stalled video (ended)
-        let lastAbsoluteTime = 0;
-
-        // Render loop for single camera (with clip transition handling)
-        // Uses setInterval for consistent 30fps timing
-        const renderFrame = () => {
-            if (!this.isExporting || exportStopped) {
-                if (this.renderIntervalId) {
-                    clearInterval(this.renderIntervalId);
-                    this.renderIntervalId = null;
-                }
-                return;
-            }
-
-            const currentClipIndex = this.videoPlayer.currentClipIndex;
-            const currentVideo = this.videoPlayer.videos[camera];
-            const currentTimeInClip = this.videoPlayer.getCurrentTime();
-
-            // Detect clip change
-            if (currentClipIndex !== lastClipIndex) {
-                console.log('Single export clip transition:', lastClipIndex, '->', currentClipIndex);
-                lastClipIndex = currentClipIndex;
-                skipFramesAfterClipChange = 90; // Wait ~3 seconds for new clip to load
-            }
-
-            // Wait for clip to be ready after transition
-            if (skipFramesAfterClipChange > 0) {
-                skipFramesAfterClipChange--;
-
-                if (currentVideo.readyState < 2) {
-                    // Still waiting - render black frame
-                    if (skipFramesAfterClipChange % 15 === 0) {
-                        console.log('   Single export waiting for clip... frames left:', skipFramesAfterClipChange, '| readyState:', currentVideo.readyState);
-                    }
-                    ctx.fillStyle = '#000000';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    return; // setInterval will call again
-                } else if (skipFramesAfterClipChange > 60) {
-                    // Video ready early, reduce wait
-                    skipFramesAfterClipChange = 15;
-                }
-            }
-
-            // Skip if video not ready
-            if (isNaN(currentTimeInClip) || currentTimeInClip < 0 || currentVideo.readyState < 2) {
-                return; // setInterval will call again
-            }
-
-            // Calculate absolute time
-            let absoluteTime = 0;
-            for (let i = 0; i < currentClipIndex; i++) {
-                absoluteTime += this.cachedClipDurations[i] || 60;
-            }
-            absoluteTime += currentTimeInClip;
-
-            // Check if video ended and needs clip transition
-            const hasMoreClips = currentClipIndex < event.clipGroups.length - 1;
-            if (currentVideo.ended && hasMoreClips) {
-                stallFrameCount++;
-
-                // After 15 frames with video ended, trigger clip transition
-                if (stallFrameCount === 15) {
-                    console.log('Single export: Video ended - transitioning to next clip');
-                    const nextClipIndex = currentClipIndex + 1;
-                    this.videoPlayer.loadClip(nextClipIndex).then(() => {
-                        console.log('   Loaded clip', nextClipIndex, '- resuming playback');
-                        return this.videoPlayer.play();
-                    }).catch(err => {
-                        console.error('   Failed to load next clip:', err);
-                    });
-                    stallFrameCount = 0;
-                    skipFramesAfterClipChange = 90;
-                }
-
-                // Render black frame while waiting
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                return; // setInterval will call again
-            } else if (!currentVideo.ended) {
-                stallFrameCount = 0;
-            }
-            lastAbsoluteTime = absoluteTime;
-
-            // Wait for preroll to finish
-            if (absoluteTime < exportStart) {
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                return; // setInterval will call again
-            }
-
-            // Start recorder at IN marker
-            if (this.mediaRecorder.state === 'inactive') {
-                console.log('Starting single camera recording at', absoluteTime.toFixed(2));
-                this.mediaRecorder.start();
-            }
-
-            // Check if export complete (with buffer and not during transitions)
-            const isLastClip = currentClipIndex >= event.clipGroups.length - 1;
-            if (skipFramesAfterClipChange === 0 && currentVideo.readyState >= 2) {
-                if (absoluteTime >= exportEnd + 0.6) {
-                    console.log('Single export complete! Time:', absoluteTime.toFixed(2));
-                    exportStopped = true;
-                    this.stopSingleExport(camera);
-                    return;
-                }
-                if (isLastClip && currentVideo.ended) {
-                    console.log('Single export complete - last clip ended');
-                    exportStopped = true;
-                    this.stopSingleExport(camera);
-                    return;
-                }
-            }
-
-            // Render frame (black background first to handle any gaps)
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            if (!currentVideo.ended && currentVideo.readyState >= 2) {
-                ctx.drawImage(currentVideo, 0, 0, canvas.width, canvas.height);
-            } else if (currentVideo.ended || !currentVideo.src) {
-                // Draw "No Signal" placeholder for missing/ended camera
-                ctx.fillStyle = '#1a1a1a';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = '#666666';
-                ctx.font = 'bold 36px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('No Signal', canvas.width / 2, canvas.height / 2);
-            }
-
-            // Add watermark for free tier users (single camera)
-            if (this._shouldWatermark) {
-                this.drawWatermarkOnRegion(ctx, 0, 0, canvas.width, canvas.height, 'TeslaCamViewer.com - Unlicensed');
-            }
-
-            // Apply license plate blurring if enabled (single camera - use multi-camera for proper coords)
-            const blurPlatesEnabled = window.app?.settingsManager?.get('blurLicensePlates') === true;
-            if (blurPlatesEnabled && window.app?.plateBlur?.isReady() && currentVideo.readyState >= 2) {
-                try {
-                    const cameraInfos = {
-                        [camera]: {
-                            video: currentVideo,
-                            dx: 0,
-                            dy: 0,
-                            dw: canvas.width,
-                            dh: canvas.height,
-                            crop: { top: 0, right: 0, bottom: 0, left: 0 }
-                        }
-                    };
-                    window.app.plateBlur.processMultiCamera(ctx, cameraInfos, {
-                        forceDetection: true // Always detect for single camera (full resolution)
-                    });
-                } catch (blurError) {
-                    // Silently handle errors
-                }
-            }
-
-            // Add overlay if enabled
-            if (includeOverlay) {
-                this.addSingleCameraOverlay(ctx, canvas.width, canvas.height, camera, absoluteTime);
-            }
-
-            // Add telemetry overlay using video player's actual state
-            const settings = window.app?.settingsManager;
-            const telemetryEnabled = !settings || settings.get('telemetryOverlayInExport') !== false;
-            if (window.app?.telemetryOverlay && telemetryEnabled && window.app.telemetryOverlay.hasTelemetryData()) {
-                const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                const timeInClip = this.videoPlayer.getCurrentTime() || 0;
-                const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
-                window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-                const telemetryData = window.app.telemetryOverlay.getCurrentTelemetry();
-                if (telemetryData) {
-                    const blinkState = Math.floor(absoluteTime * 2) % 2 === 0; // 1 second blink cycle
-                    window.app.telemetryOverlay.renderToCanvas(ctx, canvas.width, canvas.height, telemetryData, { blinkState });
-
-                    // Add mini-map overlay if export setting is enabled
-                    const miniMapInExport = !settings || settings.get('miniMapInExport') !== false;
-                    if (window.app?.miniMapOverlay && miniMapInExport && telemetryData.latitude_deg && telemetryData.longitude_deg) {
-                        window.app.miniMapOverlay.updatePositionForExport(
-                            telemetryData.latitude_deg,
-                            telemetryData.longitude_deg,
-                            telemetryData.heading_deg || 0
-                        );
-                        window.app.miniMapOverlay.drawToCanvas(ctx, canvas.width, canvas.height);
-                    }
-                }
-            }
-
-            // Progress callback - match grid export signature (percent, currentTime, endTime, startTime)
-            if (this.onProgress) {
-                const elapsed = absoluteTime - exportStart;
-                const percent = Math.min(100, (elapsed / exportDuration) * 100);
-                this.onProgress(percent, absoluteTime, exportEnd, exportStart);
-            }
-
-            // No need to schedule next frame - setInterval handles it
-        };
-
-        // Set playback speed for export
-        if (this.exportSpeed && this.exportSpeed !== 1) {
-            console.log('Setting single export playback speed to', this.exportSpeed + 'x');
-            this.videoPlayer.setPlaybackRate(this.exportSpeed);
-        }
-
-        // Start playback
-        console.log('Starting single camera playback for export...');
-        await this.videoPlayer.play();
-        // Start render loop with setInterval for consistent 30fps timing
-        this.renderIntervalId = setInterval(renderFrame, 1000 / 30);
-    }
-
-    /**
-     * Add overlay for single camera export (matches grid layout overlay format)
-     */
-    addSingleCameraOverlay(ctx, width, height, camera, absoluteTime) {
-        const event = this.videoPlayer.currentEvent;
-        if (!event) return;
-
-        const clipIndex = this.videoPlayer.currentClipIndex;
-        const clipGroup = event.clipGroups[clipIndex];
-        if (!clipGroup) return;
-
-        // Get timestamp from current clip filename
-        const clip = clipGroup.clips[camera] || clipGroup.clips.front;
-        if (!clip) return;
-
-        const filename = clip.name || clip.fileHandle?.name;
-        if (!filename) return;
-
-        // Parse filename: YYYY-MM-DD_HH-MM-SS-camera.mp4
-        const timestampMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
-        let timestampStr = '';
-
-        if (timestampMatch) {
-            const [, year, month, day, hour, minute, second] = timestampMatch;
-            const clipStartTime = new Date(
-                parseInt(year),
-                parseInt(month) - 1,
-                parseInt(day),
-                parseInt(hour),
-                parseInt(minute),
-                parseInt(second)
-            );
-
-            // Add current time within clip
-            const currentTimeInClip = this.videoPlayer.getCurrentTime();
-            const actualTimestamp = new Date(clipStartTime.getTime() + (currentTimeInClip * 1000));
-
-            // Format date and timestamp with frame number
-            const dateStr = actualTimestamp.toLocaleDateString();
-            let hours = actualTimestamp.getHours();
-            const ampm = hours >= 12 ? 'PM' : 'AM';
-            hours = hours % 12 || 12; // Convert to 12-hour format
-            const hoursStr = hours.toString().padStart(2, '0');
-            const minutes = actualTimestamp.getMinutes().toString().padStart(2, '0');
-            const seconds = actualTimestamp.getSeconds().toString().padStart(2, '0');
-            const frameNumber = Math.floor((currentTimeInClip % 1) * 30).toString().padStart(2, '0'); // 30 fps
-            timestampStr = `${dateStr} ${hoursStr}:${minutes}:${seconds}.${frameNumber} ${ampm}`;
-        }
-
-        // Check if past sentry marker (1:00 from end)
-        const totalDuration = this.cachedTotalDuration;
-        const sentryMarkerTime = totalDuration - 60;
-        const isSentryEvent = event.type && (event.type === 'Sentry' || event.type.includes('Sentry'));
-        const isPastMarker = absoluteTime >= sentryMarkerTime;
-        const isSentry = isSentryEvent && isPastMarker;
-
-        // Camera label map
-        const labelMap = {
-            front: 'FRONT',
-            back: 'REAR',
-            left_repeater: 'LEFT',
-            right_repeater: 'RIGHT'
-        };
-
-        ctx.save();
-
-        // Bottom bar (matches grid layout overlay)
-        const barHeight = 40;
-        const y = height - barHeight;
-
-        // Background bar
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.fillRect(0, y, width, barHeight);
-
-        // Red "Sentry" indicator in lower left (only when past marker)
-        if (isSentry) {
-            ctx.font = 'bold 18px Arial';
-            ctx.fillStyle = '#ff0000';
-            ctx.textAlign = 'left';
-            ctx.fillText('Sentry', 10, y + 25);
-        }
-
-        // Camera label (left of center)
-        ctx.font = 'bold 14px Arial';
-        ctx.fillStyle = '#00d4ff';
-        ctx.textAlign = 'left';
-        const labelText = labelMap[camera] || camera.toUpperCase();
-        ctx.fillText(labelText, isSentry ? 70 : 10, y + 25);
-
-        // TeslaCamViewer.com branding (centered) - only if enabled
-        if (this.shouldShowBranding()) {
-            ctx.font = 'bold 16px Arial';
-            ctx.fillStyle = '#ffffff';
-            ctx.textAlign = 'center';
-            ctx.fillText('TeslaCamViewer.com', width / 2, y + 25);
-        }
-
-        // Timestamp (right)
-        if (timestampStr) {
-            ctx.font = 'bold 16px Arial';
-            ctx.fillStyle = '#ffffff';
-            ctx.textAlign = 'right';
-            ctx.fillText(timestampStr, width - 10, y + 25);
-        }
-
-        ctx.restore();
-    }
-
-    /**
-     * Stop single camera export and finalize
-     */
-    async stopSingleExport(camera) {
-        if (!this.isExporting) return;
-
-        console.log('Stopping single camera export...');
-
-        await this.videoPlayer.pause();
-
-        // Reset playback speed if it was changed
-        if (this.exportSpeed && this.exportSpeed !== 1) {
-            console.log('Resetting playback speed to 1x after single export');
-            this.videoPlayer.setPlaybackRate(1);
-        }
-
-        // Stop render interval
-        if (this.renderIntervalId) {
-            clearInterval(this.renderIntervalId);
-            this.renderIntervalId = null;
-        }
-
-        this.mediaRecorder.onstop = () => {
-            console.log('Single export MediaRecorder stopped, chunks:', this.recordedChunks.length);
-
-            const blob = new Blob(this.recordedChunks, { type: this.mediaRecorder.mimeType });
-            console.log('Single export blob size:', blob.size, 'bytes');
-
-            // Generate filename (include speed if not 1x)
-            const labelMap = { front: 'front', back: 'rear', left_repeater: 'left', right_repeater: 'right', left_pillar: 'left-pillar', right_pillar: 'right-pillar' };
-            const cameraLabel = labelMap[camera] || camera;
-            const eventDate = this.videoPlayer.currentEvent?.timestamp || new Date().toISOString();
-            const dateStr = eventDate.replace(/[:.]/g, '-').slice(0, 19);
-            const speedSuffix = this.exportSpeed && this.exportSpeed !== 1 ? `_${this.exportSpeed}x` : '';
-            const filename = `TeslaCam_${cameraLabel}_${dateStr}${speedSuffix}.webm`;
-
-            // Download
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-
-            this.isExporting = false;
-            this.recordedChunks = [];
-
-            // Clear telemetry export buffer
-            if (window.app?.telemetryOverlay) {
-                window.app.telemetryOverlay.clearExportBuffer();
-            }
-
-            if (this.exportResolve) {
-                this.exportResolve();
-            }
-        };
-
-        this.mediaRecorder.stop();
-    }
 
     /**
      * Get supported MIME type for recording
@@ -2114,7 +1583,8 @@ class VideoExport {
      * @param {number} height
      * @param {number} absoluteTime Absolute time in event (seconds from start)
      */
-    addOverlay(ctx, width, height, absoluteTime) {
+    addOverlay(ctx, width, height, absoluteTime, options = {}) {
+        const { camera = null } = options;
         const event = this.videoPlayer.currentEvent;
         if (!event) return;
 
@@ -2122,100 +1592,134 @@ class VideoExport {
         const clipGroup = event.clipGroups[clipIndex];
         if (!clipGroup) return;
 
-        // Cache clip start time to avoid re-parsing every frame (performance optimization)
-        if (!this.cachedOverlayData || this.cachedOverlayData.clipIndex !== clipIndex) {
-            // Get timestamp from current clip filename
-            const frontClip = clipGroup.clips.front;
-            if (!frontClip) return;
+        ctx.save();
 
-            const filename = frontClip.name || frontClip.fileHandle?.name;
-            if (!filename) return;
+        // Cache clip start time to avoid re-parsing every frame
+        if (!this.cachedOverlayData || this.cachedOverlayData.clipIndex !== clipIndex) {
+            const clip = (camera ? clipGroup.clips[camera] : null) || clipGroup.clips.front || Object.values(clipGroup.clips)[0];
+            if (!clip) { ctx.restore(); return; }
+
+            const filename = clip.name || clip.fileHandle?.name;
+            if (!filename) { ctx.restore(); return; }
 
             const timestampMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
-            if (!timestampMatch) return;
+            if (!timestampMatch) { ctx.restore(); return; }
 
             const [, year, month, day, hour, minute, second] = timestampMatch;
             const clipStartTime = new Date(
-                parseInt(year),
-                parseInt(month) - 1,
-                parseInt(day),
-                parseInt(hour),
-                parseInt(minute),
-                parseInt(second)
+                parseInt(year), parseInt(month) - 1, parseInt(day),
+                parseInt(hour), parseInt(minute), parseInt(second)
             );
 
-            // Cache sentry-related checks (don't change during export)
             const totalDuration = this.cachedTotalDuration;
             const sentryMarkerTime = totalDuration - 60;
             const isSentryEvent = event.type && (event.type === 'Sentry' || event.type.includes('Sentry'));
 
-            this.cachedOverlayData = {
-                clipIndex,
-                clipStartTime,
-                sentryMarkerTime,
-                isSentryEvent
-            };
+            this.cachedOverlayData = { clipIndex, clipStartTime, sentryMarkerTime, isSentryEvent };
         }
 
         const { clipStartTime, sentryMarkerTime, isSentryEvent } = this.cachedOverlayData;
 
-        // Add current time within clip
         const currentTimeInClip = this.videoPlayer.getCurrentTime();
         const actualTimestamp = new Date(clipStartTime.getTime() + (currentTimeInClip * 1000));
 
-        // Format date and timestamp with frame number
         const dateStr = actualTimestamp.toLocaleDateString();
         let hours = actualTimestamp.getHours();
         const ampm = hours >= 12 ? 'PM' : 'AM';
-        hours = hours % 12 || 12; // Convert to 12-hour format
+        hours = hours % 12 || 12;
         const hoursStr = hours.toString().padStart(2, '0');
         const minutes = actualTimestamp.getMinutes().toString().padStart(2, '0');
         const seconds = actualTimestamp.getSeconds().toString().padStart(2, '0');
-        const frameNumber = Math.floor((currentTimeInClip % 1) * 30).toString().padStart(2, '0'); // 30 fps
+        const frameNumber = Math.floor((currentTimeInClip % 1) * 30).toString().padStart(2, '0');
         const timestampStr = `${dateStr} ${hoursStr}:${minutes}:${seconds}.${frameNumber} ${ampm}`;
 
-        // Check if past sentry marker (uses cached values for performance)
         const isPastMarker = absoluteTime >= sentryMarkerTime;
         const isSentry = isSentryEvent && isPastMarker;
 
-        // Log every 60 frames (~2 seconds at 30fps) to debug sentry indicator
+        // Debug logging (throttled to every ~2 seconds)
         if (!this.overlayLogCounter) this.overlayLogCounter = 0;
         this.overlayLogCounter++;
-
         if (this.overlayLogCounter % 60 === 1) {
             console.log('[EXPORT OVERLAY] Time:', absoluteTime.toFixed(2), '| Marker:', sentryMarkerTime.toFixed(2), '| Past?', isPastMarker, '| Showing:', isSentry ? 'YES - RED SENTRY' : 'no');
         }
 
-        const barHeight = 40;
-        const y = height - barHeight;
+        // Scale overlay proportionally to canvas width so single-camera (1280w) and
+        // multi-camera (1920w+) exports have visually consistent bar/font sizes.
+        const scale = width / 1920;
+        const barHeight = Math.round(44 * scale);
+        const margin = Math.round(12 * scale);
+        const fontBrand = Math.round(20 * scale);
+        const fontTimestamp = Math.round(20 * scale);
+        const fontSentry = Math.round(22 * scale);
 
-        // Background bar
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.fillRect(0, y, width, barHeight);
+        const showBranding = this.shouldShowBranding();
 
-        // Red "Sentry" indicator in lower left (only when past marker)
-        if (isSentry) {
-            ctx.font = 'bold 18px Arial';
-            ctx.fillStyle = '#ff0000';
-            ctx.textAlign = 'left';
-            ctx.fillText('Sentry', 10, y + 25);
-        }
+        ctx.textBaseline = 'middle';
 
-        // TeslaCamViewer.com branding (centered) - only if enabled
-        if (this.shouldShowBranding()) {
-            ctx.font = 'bold 16px Arial';
+        if (showBranding) {
+            // Full-width banner mode (free users + Pro users who kept branding on)
+            const y = height - barHeight;
+            const cy = y + barHeight / 2;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, y, width, barHeight);
+
+            // Red "Sentry" indicator in lower left (only when past marker)
+            if (isSentry) {
+                ctx.font = `bold ${fontSentry}px Arial`;
+                ctx.fillStyle = '#ff0000';
+                ctx.textAlign = 'left';
+                ctx.fillText('Sentry', margin, cy);
+            }
+
+            // TeslaCamViewer.com branding (centered)
+            ctx.font = `bold ${fontBrand}px Arial`;
             ctx.fillStyle = '#ffffff';
             ctx.textAlign = 'center';
-            ctx.fillText('TeslaCamViewer.com', width / 2, y + 25);
+            ctx.fillText('TeslaCamViewer.com', width / 2, cy);
+
+            // Timestamp (right)
+            ctx.font = `bold ${fontTimestamp}px Arial`;
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'right';
+            ctx.fillText(timestampStr, width - margin, cy);
+        } else {
+            // Pro-branding-off mode: no full-width bar, individual pill backgrounds
+            // behind each corner element. Keeps the video visible edge-to-edge
+            // while preserving readability of metadata over any scene.
+            const pillPadX = Math.round(12 * scale);
+            const pillPadY = Math.round(6 * scale);
+            const pillRadius = Math.round(8 * scale);
+            const pillInset = Math.round(14 * scale); // inset from canvas edges
+            const pillBg = 'rgba(0, 0, 0, 0.65)';
+
+            const drawPill = (text, fontSize, color, alignX) => {
+                ctx.font = `bold ${fontSize}px Arial`;
+                const metrics = ctx.measureText(text);
+                const measuredH = (metrics.actualBoundingBoxAscent || 0) + (metrics.actualBoundingBoxDescent || 0);
+                const textH = measuredH > 0 ? measuredH : fontSize;
+                const pillH = textH + pillPadY * 2;
+                const pillW = Math.ceil(metrics.width) + pillPadX * 2;
+                const pillX = alignX === 'left' ? pillInset : width - pillInset - pillW;
+                const pillY = height - pillInset - pillH;
+
+                ctx.fillStyle = pillBg;
+                ctx.beginPath();
+                ctx.roundRect(pillX, pillY, pillW, pillH, pillRadius);
+                ctx.fill();
+
+                ctx.fillStyle = color;
+                ctx.textAlign = 'left';
+                ctx.fillText(text, pillX + pillPadX, pillY + pillH / 2);
+            };
+
+            if (isSentry) {
+                drawPill('Sentry', fontSentry, '#ff3030', 'left');
+            }
+            drawPill(timestampStr, fontTimestamp, '#ffffff', 'right');
         }
 
-        // Timestamp (right)
-        ctx.font = 'bold 16px Arial';
-        ctx.fillStyle = '#ffffff';
-        ctx.textAlign = 'right';
-        ctx.fillText(timestampStr, width - 10, y + 25);
-
-        ctx.textAlign = 'left';
+        ctx.restore();
     }
 
     /**
@@ -2352,20 +1856,101 @@ class VideoExport {
     }
 
     /**
+     * Pre-cache mini-map tiles for export range
+     * Shared setup used by all export methods to ensure map tiles render correctly
+     * @param {number} exportStart - Start time in seconds
+     * @param {number} exportEnd - End time in seconds
+     */
+    async _preCacheMiniMapTiles(exportStart, exportEnd) {
+        const settings = window.app?.settingsManager;
+        const miniMapInExport = !settings || settings.get('miniMapInExport') !== false;
+        if (!window.app?.miniMapOverlay || !miniMapInExport || !window.app.telemetryOverlay?.hasTelemetryData()) {
+            return;
+        }
+
+        console.log('[Export] Pre-caching mini-map tiles...');
+        window.app.miniMapOverlay.clearTrail();
+        try {
+            const positions = [];
+            for (let t = exportStart; t <= exportEnd; t += 1) {
+                await this.videoPlayer.seekToEventTime(t);
+                const clipIndex = this.videoPlayer.currentClipIndex || 0;
+                const timeInClip = this.videoPlayer.getCurrentTime() || 0;
+                const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
+                window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
+                const data = window.app.telemetryOverlay.currentData;
+                if (data?.latitude_deg && data?.longitude_deg) {
+                    positions.push({ lat: data.latitude_deg, lng: data.longitude_deg });
+                }
+            }
+            await window.app.miniMapOverlay.preCacheTilesForExport(positions);
+            await this.videoPlayer.seekToEventTime(exportStart);
+            console.log(`[Export] Pre-cached tiles for ${positions.length} positions`);
+        } catch (e) {
+            console.warn('[Export] Unable to pre-cache mini-map tiles:', e);
+        }
+    }
+
+    /**
+     * Render telemetry HUD and mini-map overlay to export canvas
+     * Shared rendering used by all export methods for consistent overlays
+     * @param {CanvasRenderingContext2D} ctx
+     * @param {number} canvasWidth
+     * @param {number} canvasHeight
+     * @param {number} absoluteTime - Absolute time in event (seconds from start)
+     * @param {Object} [options]
+     * @param {boolean} [options.privacyMode=false]
+     */
+    _renderTelemetryAndMap(ctx, canvasWidth, canvasHeight, absoluteTime, options = {}) {
+        const { privacyMode = false } = options;
+        const settings = window.app?.settingsManager;
+        const telemetryEnabled = !settings || settings.get('telemetryOverlayInExport') !== false;
+
+        if (privacyMode || !window.app?.telemetryOverlay || !telemetryEnabled || !window.app.telemetryOverlay.hasTelemetryData()) {
+            return;
+        }
+
+        const clipIndex = this.videoPlayer.currentClipIndex || 0;
+        const timeInClip = this.videoPlayer.getCurrentTime() || 0;
+        const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
+        window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
+
+        const telemetryData = window.app.telemetryOverlay.getCurrentTelemetry();
+        if (!telemetryData) return;
+
+        const blinkState = Math.floor(absoluteTime * 2) % 2 === 0;
+        const hudScale = canvasWidth / 1000;
+        window.app.telemetryOverlay.renderToCanvas(ctx, canvasWidth, canvasHeight, telemetryData, {
+            blinkState,
+            scale: hudScale
+        });
+
+        const miniMapInExport = !settings || settings.get('miniMapInExport') !== false;
+        if (window.app?.miniMapOverlay && miniMapInExport && telemetryData.latitude_deg && telemetryData.longitude_deg) {
+            window.app.miniMapOverlay.updatePositionForExport(
+                telemetryData.latitude_deg,
+                telemetryData.longitude_deg,
+                telemetryData.heading_deg || 0
+            );
+            window.app.miniMapOverlay.drawToCanvas(ctx, canvasWidth, canvasHeight);
+        }
+    }
+
+    /**
      * Check if branding should be shown in the banner overlay
      * Licensed users can disable branding via settings; free users always see branding
      * @returns {boolean} True if branding should be shown
      */
     shouldShowBranding() {
-        const sessionManager = window.app?.sessionManager;
-        const isLicensed = sessionManager?.hasValidLicense?.() || false;
-
-        if (!isLicensed) {
-            // Free users always see branding
+        // Free users always see branding — detected via _shouldWatermark, which is
+        // populated by _checkWatermark() at export start from sessionManager.shouldWatermark().
+        // (sessionManager has no hasValidLicense() method — that was a stale reference
+        // that always returned undefined, forcing branding on for Pro users too.)
+        if (this._shouldWatermark !== false) {
             return true;
         }
 
-        // Licensed users can toggle branding via settings (default: true)
+        // Pro users can opt out via the "Show TeslaCamViewer.com branding" toggle
         const settings = window.app?.settingsManager;
         return settings?.get('showBrandingInExport') !== false;
     }
@@ -2436,7 +2021,8 @@ class VideoExport {
             startTime = null,
             endTime = null,
             includeOverlay = true,
-            onProgress = null
+            onProgress = null,
+            singleCamera = null
         } = options;
 
         const GIF_FPS = 10;  // Lower framerate for GIF
@@ -2459,9 +2045,10 @@ class VideoExport {
         this.onProgress = onProgress;
 
         const videos = this.videoPlayer.videos;
-        if (!videos.front.src) {
+        const primaryCamera = singleCamera || 'front';
+        if (!videos[primaryCamera] || !videos[primaryCamera].src) {
             this.isExporting = false;
-            throw new Error('No video loaded');
+            throw new Error(`No video loaded${singleCamera ? ` for ${singleCamera}` : ''}`);
         }
 
         // Pause any playback
@@ -2490,11 +2077,30 @@ class VideoExport {
             console.log(`GIF export: ${totalFrames} frames @ ${GIF_FPS}fps, ${exportStart.toFixed(2)}s to ${exportEnd.toFixed(2)}s`);
 
             // Get video dimensions
-            const videoWidth = videos.front.videoWidth || 1280;
-            const videoHeight = videos.front.videoHeight || 960;
+            const refVideo = videos[primaryCamera];
+            const videoWidth = refVideo.videoWidth || 1280;
+            const videoHeight = refVideo.videoHeight || 960;
 
-            // Get layout config
-            const layoutConfig = this.getLayoutConfig(videoWidth, videoHeight);
+            // Get layout config — override to single-camera fullscreen if requested
+            let layoutConfig;
+            if (singleCamera) {
+                const outW = videoWidth;
+                const outH = videoHeight;
+                layoutConfig = {
+                    canvasWidth: outW,
+                    canvasHeight: outH,
+                    cameras: {
+                        [singleCamera]: {
+                            x: 0, y: 0, w: outW, h: outH,
+                            visible: true, zIndex: 1,
+                            crop: { top: 0, right: 0, bottom: 0, left: 0 },
+                            objectFit: 'contain'
+                        }
+                    }
+                };
+            } else {
+                layoutConfig = this.getLayoutConfig(videoWidth, videoHeight);
+            }
             const canvasWidth = layoutConfig.canvasWidth || 1920;
             const canvasHeight = layoutConfig.canvasHeight || 1080;
 
@@ -2517,40 +2123,13 @@ class VideoExport {
             gifCanvas.height = gifHeight;
             const gifCtx = gifCanvas.getContext('2d');
 
-            // Get camera mapping
-            const cameraMapping = this.buildCameraMapping();
+            // Get camera mapping (single-camera mode bypasses position remapping)
+            const cameraMapping = singleCamera
+                ? { [singleCamera]: singleCamera }
+                : this.buildCameraMapping();
 
-            // Pre-cache mini-map tiles if mini-map export is enabled
-            const settings = window.app?.settingsManager;
-            const miniMapInExport = settings && settings.get('miniMapInExport') !== false;
-            if (window.app?.miniMapOverlay && miniMapInExport && window.app.telemetryOverlay?.hasTelemetryData()) {
-                console.log('[GIF Export] Pre-caching mini-map tiles...');
-                // Clear trail before export to start fresh
-                window.app.miniMapOverlay.clearTrail();
-                try {
-                    // Gather GPS positions from telemetry for the export range
-                    const positions = [];
-                    const sampleInterval = 1; // Sample every 1 second
-                    for (let t = exportStart; t <= exportEnd; t += sampleInterval) {
-                        await this.videoPlayer.seekToEventTime(t);
-                        const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                        const timeInClip = this.videoPlayer.getCurrentTime() || 0;
-                        const videoDuration = this.videoPlayer.getCurrentDuration() || 60;
-                        window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-                        const data = window.app.telemetryOverlay.currentData;
-                        if (data?.latitude_deg && data?.longitude_deg) {
-                            positions.push({ lat: data.latitude_deg, lng: data.longitude_deg });
-                        }
-                    }
-                    // Pre-cache tiles for all positions
-                    await window.app.miniMapOverlay.preCacheTilesForExport(positions);
-                    // Seek back to export start
-                    await this.videoPlayer.seekToEventTime(exportStart);
-                    console.log(`[GIF Export] Pre-cached tiles for ${positions.length} positions`);
-                } catch (e) {
-                    console.warn('[GIF Export] Failed to pre-cache mini-map tiles:', e);
-                }
-            }
+            // Pre-cache mini-map tiles (shared method)
+            await this._preCacheMiniMapTiles(exportStart, exportEnd);
 
             // Check watermark once
             await this._checkWatermark();
@@ -2703,35 +2282,8 @@ class VideoExport {
                     this.addOverlay(ctx, canvasWidth, canvasHeight, frameTime);
                 }
 
-                // Add telemetry HUD overlay (skipped in privacy mode)
-                const telemetryEnabled = !settings || settings.get('telemetryOverlayInExport') !== false;
-                if (!privacyMode && window.app?.telemetryOverlay && telemetryEnabled && window.app.telemetryOverlay.hasTelemetryData()) {
-                    const clipIndex = this.videoPlayer.currentClipIndex || 0;
-                    const timeInClip = frameTime % 60; // Approximate time in clip
-                    const videoDuration = 60;
-                    window.app.telemetryOverlay.updateTelemetry(clipIndex, timeInClip, videoDuration);
-                    const telemetryData = window.app.telemetryOverlay.getCurrentTelemetry();
-                    if (telemetryData) {
-                        const blinkState = Math.floor(frameTime * 2) % 2 === 0; // 1 second blink cycle
-                        // HUD scale uses smaller reference (1000px) to appear larger/closer to live view
-                        const hudScale = canvasWidth / 1000;
-                        window.app.telemetryOverlay.renderToCanvas(ctx, canvasWidth, canvasHeight, telemetryData, {
-                            blinkState,
-                            scale: hudScale
-                        });
-
-                        // Add mini-map overlay if export setting is enabled (skipped in privacy mode)
-                        const miniMapInExport = !settings || settings.get('miniMapInExport') !== false;
-                        if (window.app?.miniMapOverlay && miniMapInExport && telemetryData.latitude_deg && telemetryData.longitude_deg) {
-                            window.app.miniMapOverlay.updatePositionForExport(
-                                telemetryData.latitude_deg,
-                                telemetryData.longitude_deg,
-                                telemetryData.heading_deg || 0
-                            );
-                            window.app.miniMapOverlay.drawToCanvas(ctx, canvasWidth, canvasHeight);
-                        }
-                    }
-                }
+                // Telemetry HUD and mini-map (shared with all export paths)
+                this._renderTelemetryAndMap(ctx, canvasWidth, canvasHeight, frameTime, { privacyMode });
 
                 // Add watermarks for free tier
                 if (this._shouldWatermark) {

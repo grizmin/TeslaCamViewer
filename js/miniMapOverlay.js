@@ -11,7 +11,11 @@ class MiniMapOverlay {
         this.marker = null;
         this.trail = null;
         this.trailPoints = [];
-        this.maxTrailPoints = 100;
+        // Safety cap on trail buffer size — primary pruning is distance-based
+        // against trailVisibleRadius. 2000 points at 1Hz GPS = ~33 minutes of
+        // history at any speed; in practice the distance cutoff prunes far sooner.
+        this.maxTrailPoints = 2000;
+        this.trailVisibleRadius = 900; // meters — matches map visible area at zoom 16
 
         this.isVisible = false;
         this.isDragging = false;
@@ -736,8 +740,28 @@ class MiniMapOverlay {
      * @param {number} heading - Heading in degrees (0-360)
      */
     updatePositionForExport(lat, lng, heading) {
-        // Skip invalid coords
-        if (!lat || !lng || (lat === 0 && lng === 0)) return;
+        // Skip invalid or near-zero coords. Some SEI frames contain noise values like
+        // lat=0.0001 that aren't caught by `!lat || lat === 0` but still plot near (0,0)
+        // and cause the trail to jump off the map before snapping back on the next good sample.
+        // Threshold matches telemetryOverlay.getAllGpsPoints.
+        if (!lat || !lng || Math.abs(lat) < 0.001 || Math.abs(lng) < 0.001) return;
+
+        // Validate every sample against the event's telemetry history. Small SEI outliers
+        // (say 100-400m off) are under the 500m jump threshold so they'd slip through,
+        // but they still shift currentLat/Lng and visually slide the whole trail. Rejecting
+        // anything that isn't within 100m of a real telemetry GPS point keeps the map stable.
+        const history = window.app?.telemetryOverlay?.getAllGpsPoints?.();
+        if (history && history.length > 0) {
+            let closest = Infinity;
+            for (const pt of history) {
+                const d = this._calculateDistance(lat, lng, pt.lat, pt.lng);
+                if (d < closest) closest = d;
+                if (closest < 100) break; // early exit — sample is valid
+            }
+            if (closest > 100) {
+                return; // outlier — keep last known good position
+            }
+        }
 
         // Check if this is first position or a jump - load trail backwards
         const isFirstPosition = this.trailPoints.length === 0;
@@ -748,20 +772,36 @@ class MiniMapOverlay {
         ) > 500;
 
         if (isFirstPosition || isJump) {
-            // Load trail backwards from this position
-            this._loadTrailBackwards(lat, lng);
+            // Validate the new position against telemetry history. If it's not within
+            // 100m of any known GPS point in this event, it's an outlier (single-frame
+            // SEI corruption) — reject entirely and keep the last good state visible.
+            const anchored = this._loadTrailBackwards(lat, lng);
+            if (!anchored && !isFirstPosition) {
+                // Outlier on an established trail — drop this sample, keep the map stable.
+                return;
+            }
         }
 
         this.currentLat = lat;
         this.currentLng = lng;
         this.currentHeading = heading || 0;
 
-        // Add to trail
-        this.trailPoints.push([lat, lng]);
-
-        // Keep trail to max length
-        if (this.trailPoints.length > this.maxTrailPoints) {
-            this.trailPoints.shift();
+        // Add to trail only if the position actually moved. Export renders at 30fps
+        // but underlying GPS is ~1Hz, so without dedupe the buffer fills with 30x
+        // repeats per GPS sample and shifts out the backward-loaded history in ~2s.
+        const last = this.trailPoints[this.trailPoints.length - 1];
+        if (!last || last[0] !== lat || last[1] !== lng) {
+            this.trailPoints.push([lat, lng]);
+            // Distance-based prune so slow-traffic trails extend to map edge
+            while (this.trailPoints.length > 2) {
+                const oldest = this.trailPoints[0];
+                if (this._calculateDistance(lat, lng, oldest[0], oldest[1]) > this.trailVisibleRadius) {
+                    this.trailPoints.shift();
+                } else {
+                    break;
+                }
+            }
+            if (this.trailPoints.length > this.maxTrailPoints) this.trailPoints.shift();
         }
     }
 
@@ -787,10 +827,18 @@ class MiniMapOverlay {
 
         this.trailPoints.push([lat, lng]);
 
-        // Keep trail to max length
-        if (this.trailPoints.length > this.maxTrailPoints) {
-            this.trailPoints.shift();
+        // Prune oldest points that have scrolled beyond the visible map area.
+        // Distance-based instead of count-based so slow-traffic trails still
+        // extend to the edge of the map (count-based capped at ~220m at 5mph).
+        while (this.trailPoints.length > 2) {
+            const oldest = this.trailPoints[0];
+            if (this._calculateDistance(lat, lng, oldest[0], oldest[1]) > this.trailVisibleRadius) {
+                this.trailPoints.shift();
+            } else {
+                break;
+            }
         }
+        if (this.trailPoints.length > this.maxTrailPoints) this.trailPoints.shift();
 
         this.trail.setLatLngs(this.trailPoints);
     }
@@ -818,14 +866,14 @@ class MiniMapOverlay {
      * @param {number} lng - Target longitude
      */
     _loadTrailBackwards(lat, lng) {
-        // Clear existing trail first
-        this.trailPoints = [];
-
         // Get time-ordered GPS points from current event's telemetry
         const telemetryPoints = window.app?.telemetryOverlay?.getAllGpsPoints();
         if (!telemetryPoints || telemetryPoints.length === 0) {
+            // No history at all — signal rejection without wiping the existing trail.
+            // Matches the outlier-rejection branch below; an empty history is no better
+            // a reason to clear accumulated points than an unanchorable target is.
             console.log('[MiniMap] No telemetry GPS data available for backward trail loading');
-            return;
+            return false;
         }
 
         // Find the closest point to the target position
@@ -842,24 +890,24 @@ class MiniMapOverlay {
             }
         }
 
-        // If closest point is too far (>100m), don't load trail
+        // If closest point is too far (>100m), the target is not a real GPS position
+        // in this event's history — signal rejection without touching the trail.
         if (closestIndex === -1 || closestDistance > 100) {
-            console.log('[MiniMap] No close telemetry point found for backward trail loading');
-            return;
+            console.log(`[MiniMap] No close telemetry point for (${lat.toFixed(5)}, ${lng.toFixed(5)}) — closest was ${closestDistance.toFixed(0)}m. Treating as outlier.`);
+            return false;
         }
 
-        // Calculate visible map bounds (approximately)
-        // At zoom 16, one tile is ~600m. Map shows ~3 tiles, so ~1800m visible
-        const mapVisibleRadius = 900; // meters from center
+        // Valid anchor found — now we can safely rebuild the trail
+        this.trailPoints = [];
 
-        // Load points backwards from closest index (time-ordered data)
+        // Load points backwards until they go beyond the visible map
         const loadedPoints = [];
         for (let i = closestIndex; i >= 0 && loadedPoints.length < this.maxTrailPoints; i--) {
             const point = telemetryPoints[i];
 
             // Check if point is within visible map area
             const distFromTarget = this._calculateDistance(lat, lng, point.lat, point.lng);
-            if (distFromTarget > mapVisibleRadius) {
+            if (distFromTarget > this.trailVisibleRadius) {
                 // Point is off-screen, stop loading
                 break;
             }
@@ -877,6 +925,7 @@ class MiniMapOverlay {
         }
 
         console.log(`[MiniMap] Loaded ${loadedPoints.length} trail points backwards from position jump`);
+        return true;
     }
 
     /**
@@ -1237,7 +1286,9 @@ class MiniMapOverlay {
 
             this.trailPoints.forEach((point, i) => {
                 const tile = this._latLngToTile(point[0], point[1], zoom);
-                const pixel = this._latLngToPixelInTile(point[0], point[1], zoom, centerTile.x, centerTile.y);
+                // Compute pixel position within the point's OWN tile (stays in [0,256))
+                // so the (tile - centerTile) * scaledTileSize term isn't double-counted.
+                const pixel = this._latLngToPixelInTile(point[0], point[1], zoom, tile.x, tile.y);
                 const px = x + mapWidth / 2 + (tile.x - centerTile.x) * scaledTileSize + (pixel.x - pixelInTile.x) * tileScale;
                 const py = y + mapHeight / 2 + (tile.y - centerTile.y) * scaledTileSize + (pixel.y - pixelInTile.y) * tileScale;
 
@@ -1283,19 +1334,29 @@ class MiniMapOverlay {
                 const badgeY = y + padding;
 
                 ctx.font = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-                const textMetrics = ctx.measureText(badgeText);
-                const textWidth = textMetrics.width;
-                const textHeight = fontSize;
+                ctx.textBaseline = 'top';
+                const metrics = ctx.measureText(badgeText);
+                const textWidth = metrics.width;
+                // Emojis render taller than fontSize. Use actualBoundingBox when available
+                // so the background box snugly fits the icon; fall back to a 1.3x factor.
+                const ascent = metrics.actualBoundingBoxAscent;
+                const descent = metrics.actualBoundingBoxDescent;
+                const textHeight = (ascent !== undefined && descent !== undefined)
+                    ? ascent + descent
+                    : Math.round(fontSize * 1.3);
+
+                const boxW = textWidth + padding * 2;
+                const boxH = textHeight + padding * 2;
 
                 // Draw badge background
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
                 ctx.beginPath();
-                ctx.roundRect(badgeX, badgeY, textWidth + padding * 2, textHeight + padding, Math.round(4 * scale));
+                ctx.roundRect(badgeX, badgeY, boxW, boxH, Math.round(4 * scale));
                 ctx.fill();
 
-                // Draw text
+                // Draw text with matching top baseline so it sits inside the box
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-                ctx.fillText(badgeText, badgeX + padding, badgeY + textHeight);
+                ctx.fillText(badgeText, badgeX + padding, badgeY + padding);
             }
         }
     }

@@ -588,11 +588,14 @@ body::before {
     position: relative;
 }
 
-/* Sidebar resize handle */
+/* Sidebar resize handle — split across sidebar edge:
+   2px inside sidebar (sits on scrollbar track's non-clickable outer edge)
+   6px outside (into video grid gutter). Keeps scrollbar usable while giving
+   the resize grip a reasonable hit target. */
 .sidebar-resize-handle {
     position: absolute;
     top: 0;
-    right: -4px;
+    right: -6px;
     bottom: 0;
     width: 8px;
     cursor: ew-resize;
