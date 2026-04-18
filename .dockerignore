@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github
+.claude
+Dockerfile
+.dockerignore
+CLAUDE.md
+README.md
+LICENSE
+Layouts/
+Layout_Config.TeslaCam
+**/.DS_Store
+Thumbs.db
