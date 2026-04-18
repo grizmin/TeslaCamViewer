@@ -1179,37 +1179,10 @@ class SessionManager {
         return { success: false, error: result.error, expired: result.expired };
     }
 
-    /**
-     * Check if there's an active session
-     */
+    // Paid tier disabled: treat every session as active so checkAccess(),
+    // shouldWatermark(), recordEventView(), and recordEventExport() all behave
+    // as if the user is licensed.
     async hasActiveSession() {
-        if (!this._sessionData || !this._prefsData) return false;
-
-        // Update last seen timestamp
-        const now = new Date();
-        const lastSeen = this._prefsData.lastSeen ? new Date(this._prefsData.lastSeen) : null;
-
-        // Clock rollback detection (allow 24 hour tolerance)
-        if (lastSeen && now < lastSeen) {
-            const diffHours = (lastSeen - now) / (1000 * 60 * 60);
-            if (diffHours > 24) {
-                console.warn('Clock rollback detected');
-                // Don't invalidate, just warn
-            }
-        }
-
-        // Check expiry from stored prefs (quick check without full validation)
-        if (this._prefsData.expiry) {
-            const expiry = new Date(this._prefsData.expiry);
-            if (now > expiry) {
-                return false;
-            }
-        }
-
-        // Update last seen
-        this._prefsData.lastSeen = now.toISOString();
-        this._savePrefs();
-
         return true;
     }
 
