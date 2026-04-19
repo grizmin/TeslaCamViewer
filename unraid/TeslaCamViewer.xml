@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>TeslaCamViewer</Name>
+  <Repository>grizmin/teslacam-viewer:latest</Repository>
+  <Registry>https://hub.docker.com/r/grizmin/teslacam-viewer</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/grizmin/TeslaCamViewer/issues</Support>
+  <Project>https://github.com/grizmin/TeslaCamViewer</Project>
+  <ReadMe>https://github.com/grizmin/TeslaCamViewer/blob/main/README.md</ReadMe>
+  <Overview>A powerful browser-based Tesla dashcam viewer with synchronized multi-angle playback, telemetry visualization, and comprehensive incident analysis tools. All processing happens locally in your browser - your video files never leave your computer.&#13;
+&#13;
+Requires Chrome, Edge, or a Chromium-based browser (uses the File System Access API).</Overview>
+  <Category>MediaApp:Video Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:80]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/grizmin/TeslaCamViewer/main/unraid/TeslaCamViewer.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/grizmin/TeslaCamViewer/main/favicon.svg</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Chrome, Edge, or Chromium-based browser</Requires>
+  <Config Name="Web Port" Target="80" Default="8765" Mode="tcp" Description="Port to access the TeslaCam Viewer web interface." Type="Port" Display="always" Required="true" Mask="false">8765</Config>
+</Container>
