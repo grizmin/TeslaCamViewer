@@ -1844,7 +1844,18 @@ class SessionManager {
         });
         closeBtn.addEventListener('click', () => this.hideSessionModal());
 
-        activateBtn.addEventListener('click', () => this._handleActivate());
+        // Route to activate or deactivate based on current session state so a
+        // single click fires a single handler. Previously we also set
+        // activateBtn.onclick in _updateModalContent, which meant every click
+        // fired BOTH handlers (e.g. activating twice on free-tier, or running
+        // activate + deactivate back-to-back while licensed).
+        activateBtn.addEventListener('click', () => {
+            if (this._sessionData && this._prefsData) {
+                this._handleDeactivate();
+            } else {
+                this._handleActivate();
+            }
+        });
         buyBtn.addEventListener('click', () => {
             window.open('https://www.natemccomb.store/shop', '_blank');
         });
@@ -1883,7 +1894,6 @@ class SessionManager {
             activateSection.style.display = 'none';
             licensedSection.style.display = 'block';
             activateBtn.textContent = 'Deactivate';
-            activateBtn.onclick = () => this._handleDeactivate();
 
             const expirySpan = this._modal.querySelector('#sessionExpiry');
             expirySpan.textContent = info.expiryDate.toLocaleDateString();
@@ -1895,7 +1905,6 @@ class SessionManager {
             activateSection.style.display = 'block';
             licensedSection.style.display = 'none';
             activateBtn.textContent = 'Activate';
-            activateBtn.onclick = () => this._handleActivate();
 
             eventsUsage.textContent = `${usage.eventsViewedToday} / ${usage.eventsLimit}`;
             exportsUsage.textContent = `${usage.exportsUsed} / ${usage.exportsLimit}`;
@@ -1924,17 +1933,20 @@ class SessionManager {
         activateBtn.textContent = 'Activating...';
         errorDiv.classList.remove('visible');
 
+        let activated = false;
         try {
             const result = await this.activateSession(code, email);
 
             if (result.success) {
+                activated = true;
                 // Sync to drive if available
                 if (window.app?.folderParser?.rootHandle) {
                     await this.syncToDrive(window.app.folderParser.rootHandle);
                 }
 
-                // Update UI
-                this._updateModalContent();
+                // Update UI — await so the button flips to "Deactivate" before
+                // the success modal appears on top.
+                await this._updateModalContent();
                 this._updateHeaderButton();
 
                 // Clear inputs
@@ -1952,7 +1964,11 @@ class SessionManager {
             errorDiv.classList.add('visible');
         } finally {
             activateBtn.disabled = false;
-            activateBtn.textContent = 'Activate';
+            // Only reset label on failure; on success _updateModalContent has
+            // already set it to "Deactivate" and we must not clobber that.
+            if (!activated) {
+                activateBtn.textContent = 'Activate';
+            }
         }
     }
 
